@@ -1,0 +1,122 @@
+name: Build Desktop Apps
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: build-desktop-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-macos:
+    # Intel runner：生成 x86_64（macos-13 已退役，改用 macos-15-intel）
+    runs-on: macos-15-intel
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-build.txt
+
+      - name: Build macOS app
+        run: python scripts/build.py mac
+
+      - name: Ad-hoc sign app
+        run: |
+          codesign --force --deep -s - dist/Tally.app
+          file dist/Tally.app/Contents/MacOS/Tally || true
+          lipo -archs dist/Tally.app/Contents/MacOS/Tally || true
+
+      - name: Package macOS zip
+        run: |
+          cp bundle_support/MACOS_README.txt dist/使用说明.txt
+          cd dist
+          rm -rf Tally-macOS
+          mkdir Tally-macOS
+          ditto Tally.app Tally-macOS/Tally.app
+          cp 使用说明.txt Tally-macOS/使用说明.txt
+          ditto -c -k --sequesterRsrc --keepParent Tally-macOS Tally-macOS.zip
+
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: Tally-macOS
+          path: dist/Tally-macOS.zip
+          if-no-files-found: error
+
+  build-windows:
+    runs-on: windows-latest
+    env:
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-build.txt
+
+      - name: Build Windows app
+        run: python scripts/build.py win
+
+      - name: Verify Windows output
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "dist/Tally/Tally.exe")) {
+            Write-Host "dist contents:"
+            Get-ChildItem -Recurse dist -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
+            throw "Tally.exe not found"
+          }
+          if (-not (Test-Path "dist/Tally/_internal")) {
+            throw "_internal folder not found next to Tally.exe"
+          }
+
+      - name: Zip Windows app
+        shell: pwsh
+        run: |
+          Copy-Item bundle_support/WINDOWS_README.txt dist/Tally/使用说明.txt -Force
+          if (Test-Path "dist/Tally-Windows.zip") { Remove-Item "dist/Tally-Windows.zip" -Force }
+          # 保留 Tally/ 目录层，避免解压后只剩散落文件被误拷贝
+          tar -a -c -f dist/Tally-Windows.zip -C dist Tally
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: Tally-Windows
+          path: dist/Tally-Windows.zip
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build-macos, build-windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v7
+        with:
+          path: release-assets
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release-assets/Tally-macOS/Tally-macOS.zip
+            release-assets/Tally-Windows/Tally-Windows.zip
+          generate_release_notes: true

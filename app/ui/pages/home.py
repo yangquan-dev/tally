@@ -1,0 +1,186 @@
+from __future__ import annotations
+
+import customtkinter as ctk
+
+from app.services import AppServices
+from app.ui.utils import format_money
+from app.ui.widgets import DataTable
+
+
+def _days_display(days_delta: int) -> tuple[str, str]:
+    """返回 (展示文案, 行标签)。"""
+    if days_delta < 0:
+        return f"逾期 {abs(days_delta)} 天", "overdue"
+    if days_delta == 0:
+        return "今天到期", "today"
+    if days_delta <= 3:
+        return f"剩余 {days_delta} 天", "urgent"
+    # 已进入提醒窗口但仍有一定余量：黄色警示，不用绿色
+    return f"剩余 {days_delta} 天", "upcoming"
+
+
+class HomePage(ctk.CTkFrame):
+    def __init__(self, master, services: AppServices, **kwargs) -> None:
+        super().__init__(master, fg_color="transparent", **kwargs)
+        self.services = services
+        self.grid_rowconfigure(3, weight=1)
+        self.grid_columnconfigure(0, weight=1)
+
+        header = ctk.CTkFrame(self, fg_color="transparent")
+        header.grid(row=0, column=0, sticky="ew", pady=(0, 12))
+        header.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            header, text="提醒看板", font=ctk.CTkFont(size=22, weight="bold")
+        ).grid(row=0, column=0, sticky="w")
+        ctk.CTkButton(header, text="刷新", width=80, command=self.refresh).grid(
+            row=0, column=1, sticky="e"
+        )
+
+        self.stats = ctk.CTkFrame(self, fg_color="transparent")
+        self.stats.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+        for col in range(4):
+            self.stats.grid_columnconfigure(col, weight=1)
+        self._stat_labels: dict[str, ctk.CTkLabel] = {}
+        for col, (key, title, color) in enumerate(
+            (
+                ("total", "全部", "#111827"),
+                ("overdue", "已逾期", "#b91c1c"),
+                ("due", "应收提醒", "#c2410c"),
+                ("expire", "合同到期", "#1d4ed8"),
+            )
+        ):
+            card = ctk.CTkFrame(self.stats, corner_radius=8)
+            card.grid(row=0, column=col, sticky="ew", padx=(0 if col == 0 else 8, 0))
+            ctk.CTkLabel(
+                card,
+                text=title,
+                font=ctk.CTkFont(size=12),
+                text_color="#6b7280",
+                anchor="w",
+            ).pack(anchor="w", padx=14, pady=(10, 0))
+            value = ctk.CTkLabel(
+                card,
+                text="0",
+                font=ctk.CTkFont(size=22, weight="bold"),
+                text_color=color,
+                anchor="w",
+            )
+            value.pack(anchor="w", padx=14, pady=(2, 12))
+            self._stat_labels[key] = value
+
+        self.summary = ctk.CTkLabel(
+            self,
+            text="",
+            font=ctk.CTkFont(size=12),
+            text_color="#6b7280",
+            anchor="w",
+        )
+        self.summary.grid(row=2, column=0, sticky="ew", pady=(0, 8))
+
+        self.table = DataTable(
+            self,
+            columns=[
+                ("days", "紧急度", 120),
+                ("kind", "类型", 110),
+                ("project", "项目", 140),
+                ("room", "房间", 90),
+                ("amount", "金额", 110),
+                ("period", "周期", 240),
+            ],
+            column_anchors={
+                "days": "center",
+                "kind": "center",
+                "project": "w",
+                "room": "center",
+                "amount": "e",
+                "period": "center",
+            },
+            rowheight=34,
+            style_prefix="TallyReminder",
+            emphasis_columns=("days",),
+        )
+        self.table.grid(row=3, column=0, sticky="nsew")
+        self._configure_day_tags()
+
+    def _configure_day_tags(self) -> None:
+        tree = self.table.tree
+        tree.tag_configure(
+            "overdue",
+            foreground="#b91c1c",
+            background="#fef2f2",
+            font=("PingFang SC", 11, "bold"),
+        )
+        tree.tag_configure(
+            "today",
+            foreground="#b45309",
+            background="#fffbeb",
+            font=("PingFang SC", 11, "bold"),
+        )
+        tree.tag_configure(
+            "urgent",
+            foreground="#c2410c",
+            background="#fff7ed",
+            font=("PingFang SC", 11, "bold"),
+        )
+        tree.tag_configure(
+            "upcoming",
+            foreground="#a16207",
+            background="#fefce8",
+            font=("PingFang SC", 11, "bold"),
+        )
+
+    def refresh(self) -> None:
+        if not self.services.is_ready or self.services.reminders is None:
+            return
+        items = self.services.reminders.list_reminders()
+        overdue = sum(1 for i in items if i.kind == "已逾期")
+        due = sum(1 for i in items if i.kind == "应收提醒")
+        expire = sum(1 for i in items if i.kind in {"合同即将到期", "合同已到期"})
+        self._stat_labels["total"].configure(text=str(len(items)))
+        self._stat_labels["overdue"].configure(text=str(overdue))
+        self._stat_labels["due"].configure(text=str(due))
+        self._stat_labels["expire"].configure(text=str(expire))
+        if items:
+            self.summary.configure(
+                text="排序：逾期 → 应收 → 合同已到期 → 即将到期；合同类金额为月租，应收类为应收额"
+            )
+        else:
+            self.summary.configure(text="今日暂无提醒事项")
+
+        kind_order = {"已逾期": 0, "应收提醒": 1, "合同已到期": 2, "合同即将到期": 3}
+        items = sorted(
+            items,
+            key=lambda i: (
+                kind_order.get(i.kind, 9),
+                i.days_delta,
+                i.project_name,
+                i.room_no,
+            ),
+        )
+
+        rows = []
+        iids = []
+        tags = []
+        for idx, item in enumerate(items):
+            period = ""
+            if item.period_start and item.period_end:
+                period = (
+                    f"{item.period_start.isoformat()} ~ {item.period_end.isoformat()}"
+                )
+            days_text, tag = _days_display(item.days_delta)
+            amount = format_money(item.amount)
+            if item.kind in {"合同即将到期", "合同已到期"}:
+                amount = f"月租 {amount}"
+            rows.append(
+                (
+                    days_text,
+                    item.kind,
+                    item.project_name,
+                    item.room_no,
+                    amount,
+                    period,
+                )
+            )
+            iids.append(str(idx))
+            tags.append(tag)
+        self.table.set_rows(rows, iids, tags=tags)

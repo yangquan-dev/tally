@@ -1,0 +1,15 @@
+*.egg-info/
+*.py[cod]
+*.spec.bak
+*.zip
+.DS_Store
+.venv/
+__pycache__/
+build/
+dist/
+venv/
+
+# 签发私钥与本地授权产物（勿提交）
+keys/
+*.key
+*.lic
