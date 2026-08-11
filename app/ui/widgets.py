@@ -991,6 +991,10 @@ class DataTable(ctk.CTkFrame):
         self._bind_wheel(self.header_gutter)
 
         self.tree = self  # 兼容 table.tree.tag_configure
+        self._sync_after_id: str | None = None
+        self._sync_follow_id: str | None = None
+        self._last_viewport_width = 0
+        self._syncing_widths = False
 
         self.pager = ctk.CTkFrame(self, fg_color="transparent")
         self.pager.grid(row=1, column=0, sticky="ew", pady=(8, 0))
@@ -1000,6 +1004,8 @@ class DataTable(ctk.CTkFrame):
             self.pager.grid_remove()
 
         self.after(50, self._sync_column_widths)
+        # 根窗口尺寸变化（含全屏）时补一次同步，避免仅切换菜单才恢复
+        self.bind("<Configure>", self._on_self_configure, add="+")
 
     def _bind_wheel(self, widget: tk.Misc) -> None:
         widget.bind("<MouseWheel>", self._on_mousewheel, add="+")
@@ -1080,7 +1086,7 @@ class DataTable(ctk.CTkFrame):
     def _header_min_height(self) -> int:
         """表头最小高度：收紧内边距时跟正文走，避免表头区被托高后与表体脱节。"""
         if self._cell_pady < self.CELL_PADY:
-            return max(18, int(self.CELL_FONT[1]) + 6 + self._cell_pady * 2)
+            return max(18, self._line_height_px() + self._cell_pady * 2)
         return max(28, self._base_rowheight)
 
     def _pin_header_window(self) -> None:
@@ -1231,12 +1237,29 @@ class DataTable(ctk.CTkFrame):
 
     def _sync_column_widths(self, *_args) -> None:
         """按声明比例分配列宽；fit_content 列按正文收紧，不参与多余宽度分摊。"""
+        if self._syncing_widths:
+            return
+        self._syncing_widths = True
+        try:
+            available = self._available_viewport_width()
+            if available <= 1:
+                return
+            self._apply_redistributed_widths(available)
+            self._apply_wraplengths()
+            self._refresh_row_heights()
+            self._pin_body_window()
+            self._update_hscroll_visibility()
+        finally:
+            self._syncing_widths = False
+
+    def _available_viewport_width(self) -> int:
         available = self.canvas.winfo_width()
         if available <= 1:
             available = max(1, self.table_wrap.winfo_width() - self.SCROLL_GUTTER - 2)
-        if available <= 1:
-            return
+        return int(available)
 
+    def _apply_redistributed_widths(self, available: int) -> None:
+        """立即重算并应用列宽（resize 过程中与表头同步过渡）。"""
         preferred = self._base_col_widths()
         content_width = sum(preferred)
         if content_width <= available and preferred:
@@ -1251,7 +1274,6 @@ class DataTable(ctk.CTkFrame):
                     w + int(extra * wt / weight_total)
                     for w, wt in zip(preferred, weights)
                 ]
-                # 余数补给最后一个可伸缩列，避免总宽少于可视区
                 for idx in range(len(grown) - 1, -1, -1):
                     if weights[idx] > 0:
                         grown[idx] += available - sum(grown)
@@ -1263,11 +1285,62 @@ class DataTable(ctk.CTkFrame):
 
         self._col_minsizes = preferred
         self._table_content_width = max(content_width, 1)
+        self._last_viewport_width = available
         self._apply_column_minsizes()
-        self._apply_wraplengths()
-        self._refresh_row_heights()
-        self._pin_body_window()
-        self._update_hscroll_visibility()
+
+    def _cancel_after(self, attr: str) -> None:
+        after_id = getattr(self, attr, None)
+        if after_id is None:
+            return
+        try:
+            self.after_cancel(after_id)
+        except Exception:
+            pass
+        setattr(self, attr, None)
+
+    def _sync_columns_for_viewport(self, width: int) -> None:
+        """视口变化时立刻分摊列宽，换行/行高稍后补齐，避免表体滞后于表头。"""
+        if width <= 1 or self._syncing_widths:
+            return
+        if not self._viewport_changed(width):
+            return
+        self._syncing_widths = True
+        try:
+            self._apply_redistributed_widths(width)
+            self._pin_body_window()
+            self._update_hscroll_visibility()
+        finally:
+            self._syncing_widths = False
+        # 换行宽度与行高稍后再算，避免拖拽/全屏过程卡顿
+        self._schedule_layout_polish()
+
+    def _schedule_layout_polish(self) -> None:
+        self._cancel_after("_sync_after_id")
+        self._sync_after_id = self.after_idle(self._run_layout_polish)
+        # 全屏动画可能仍在变宽，收尾再完整同步一次
+        self._cancel_after("_sync_follow_id")
+        self._sync_follow_id = self.after(120, self._run_follow_up_column_sync)
+
+    def _run_layout_polish(self) -> None:
+        self._sync_after_id = None
+        if not self.winfo_exists() or self._syncing_widths:
+            return
+        self._syncing_widths = True
+        try:
+            self._apply_wraplengths()
+            self._refresh_row_heights()
+            self._pin_body_window()
+        finally:
+            self._syncing_widths = False
+
+    def _run_follow_up_column_sync(self) -> None:
+        self._sync_follow_id = None
+        if not self.winfo_exists():
+            return
+        self._sync_column_widths()
+
+    def _viewport_changed(self, width: int) -> bool:
+        return abs(int(width) - int(self._last_viewport_width)) >= 2
 
     def _apply_wraplengths(self) -> None:
         """列宽变化后同步换行宽度，超长文本可折行。"""
@@ -1342,16 +1415,34 @@ class DataTable(ctk.CTkFrame):
             self.canvas.xview_moveto(0)
             self.header_canvas.xview_moveto(0)
 
-    def _on_table_configure(self, _event=None) -> None:
-        self._sync_column_widths()
+    def _on_table_configure(self, event=None) -> None:
+        width = 0
+        if event is not None and getattr(event, "width", 0):
+            width = int(event.width) - self.SCROLL_GUTTER - 2
+        if width <= 1:
+            width = self._available_viewport_width()
+        self._sync_columns_for_viewport(width)
+
+    def _on_self_configure(self, event) -> None:
+        # 仅响应本控件自身尺寸变化，忽略子控件冒泡
+        if event.widget is not self:
+            return
+        self._sync_columns_for_viewport(int(event.width))
 
     def _on_canvas_configure(self, event) -> None:
+        # 视口变宽时立刻分摊列宽，使表体与表头同步过渡（不再只拉大空白画布）
+        if self._viewport_changed(event.width):
+            self._sync_columns_for_viewport(event.width)
+            return
         width = max(self._table_content_width, event.width, 1)
         self.canvas.itemconfigure(self._canvas_window, width=width)
         self._pin_body_window()
         self._update_hscroll_visibility()
 
     def _on_header_canvas_configure(self, event) -> None:
+        if self._viewport_changed(event.width):
+            self._sync_columns_for_viewport(event.width)
+            return
         width = max(self._table_content_width, event.width, 1)
         self.header_canvas.itemconfigure(self._header_window, width=width)
         self._pin_header_window()
@@ -1431,18 +1522,26 @@ class DataTable(ctk.CTkFrame):
         self._base_rowheight = max(22, int(rowheight))
         self._current_rowheight = self._base_rowheight
 
+    def _line_height_px(self) -> int:
+        """正文字号对应行高；用字体 metrics，避免全屏/窗口切换时估算跳动。"""
+        try:
+            return max(14, int(self._cell_font.metrics("linespace")) + 2)
+        except Exception:
+            return int(self.CELL_FONT[1]) + 6
+
     def _auto_rowheight_for(self, rows: Sequence[Sequence[object]]) -> int:
         max_lines = 1
         for row in rows:
             for col_idx, cell in enumerate(row):
                 text = self._cell_plain_text(cell)
                 max_lines = max(max_lines, self._estimate_lines(text, col_idx))
-        # 收紧内边距时按正文字号估算行高，避免被默认 rowheight 托高导致上下留白
+        line_h = self._line_height_px()
+        pad = self._cell_pady * 2
+        content_h = line_h * max_lines + pad
+        # 收紧内边距时仍略留上下空白，且不以过大的 base rowheight 托高
         if self._cell_pady < self.CELL_PADY:
-            line_h = int(self.CELL_FONT[1]) + 4
-            return max(line_h * max_lines + self._cell_pady * 2, line_h)
-        line_h = int(self.CELL_FONT[1]) + 7
-        return max(self._base_rowheight, line_h * max_lines + self._cell_pady * 2)
+            return max(content_h, line_h + pad)
+        return max(self._base_rowheight, content_h)
 
     def _font_from_style(self, style: dict[str, object]) -> tuple:
         font_spec = style.get("font")

@@ -64,8 +64,8 @@ app = BUNDLE(
     info_plist={
         'CFBundleName': 'Tally',
         'CFBundleDisplayName': '本地记账',
-        'CFBundleShortVersionString': '1.0.2',
-        'CFBundleVersion': '1.0.2',
+        'CFBundleShortVersionString': '1.0.1',
+        'CFBundleVersion': '1.0.1',
         'NSHighResolutionCapable': True,
         'LSMinimumSystemVersion': '11.0',
         'LSArchitecturePriority': ['x86_64'],
