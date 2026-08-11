@@ -368,15 +368,18 @@ class DiscountAddDialog(ctk.CTkToplevel):
         monthly_rent: float,
     ) -> None:
         super().__init__(master)
+        # 先隐藏再布局，避免默认位置闪一下后跳到居中
+        self.withdraw()
         self.title("添加折/减")
         self.resizable(False, False)
-        self.transient(master)
-        self.grab_set()
+        parent = master.winfo_toplevel()
+        self.transient(parent)
         self.result: list[tuple[date, date, str, str]] | None = None
         self.lease_start = lease_start
         self.lease_end = lease_end
         self.existing_months = existing_months
         self.monthly_rent = float(monthly_rent)
+        self._parent_toplevel = parent
 
         from app.ui.utils import iter_lease_billing_months
 
@@ -384,7 +387,6 @@ class DiscountAddDialog(ctk.CTkToplevel):
 
         width, height = 420, 360
         self.geometry(f"{width}x{height}")
-        center_window(self, width, height)
 
         body = ctk.CTkFrame(self, fg_color="transparent")
         body.pack(fill="both", expand=True, padx=20, pady=(18, 10))
@@ -464,6 +466,12 @@ class DiscountAddDialog(ctk.CTkToplevel):
         ).pack(side="right", padx=(8, 0))
         ctk.CTkButton(bar, text="添加", width=90, command=self._on_ok).pack(side="right")
 
+        center_window(self, width, height)
+        self.deiconify()
+        self.grab_set()
+        self.lift()
+        self.focus_force()
+
     @staticmethod
     def _parse_month(text: str, field_name: str) -> tuple[int, int]:
         raw = (text or "").strip()
@@ -531,6 +539,15 @@ class DiscountAddDialog(ctk.CTkToplevel):
 
     def show(self) -> list[tuple[date, date, str, str]] | None:
         self.wait_window()
+        # 关闭后把模态焦点还给新建/编辑租赁窗，避免父窗 grab 丢失
+        parent = getattr(self, "_parent_toplevel", None)
+        if parent is not None:
+            try:
+                if parent.winfo_exists():
+                    parent.grab_set()
+                    parent.lift()
+            except tk.TclError:
+                pass
         return self.result
 
 
