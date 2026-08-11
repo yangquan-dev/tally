@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tkinter as tk
 from datetime import date, datetime
+from tkinter import font as tkfont
 from tkinter import ttk
 from typing import Callable, Optional, Sequence, Union
 
@@ -9,6 +10,32 @@ import customtkinter as ctk
 from tkcalendar import Calendar
 
 from app.ui.utils import center_window
+
+# 免租期 / 折减列表可视约 3 行（单行含控件与间距约 40px）
+PERIOD_LIST_VIEW_HEIGHT = 120
+
+
+def _period_list_frame(master: tk.Misc, grid_row: int) -> ctk.CTkScrollableFrame:
+    """固定可视高度的时段列表。
+
+    外层用 tk.Frame + grid_propagate(False) 锁高：嵌套在 CTkScrollableFrame
+    弹窗内时，CTk 自身的 height 会被内容撑开，必须用 tk 容器约束。
+    """
+    wrap = tk.Frame(
+        master,
+        width=680,
+        height=PERIOD_LIST_VIEW_HEIGHT,
+        highlightthickness=0,
+        bd=0,
+    )
+    wrap.grid(row=grid_row, column=0, sticky="ew")
+    wrap.grid_propagate(False)
+
+    list_frame = ctk.CTkScrollableFrame(
+        wrap, width=680, height=PERIOD_LIST_VIEW_HEIGHT
+    )
+    list_frame.place(x=0, y=0, relwidth=1, relheight=1)
+    return list_frame
 
 
 class TimePickerField(ctk.CTkFrame):
@@ -206,7 +233,7 @@ class FreePeriodsEditor(ctk.CTkFrame):
         self.grid_columnconfigure(0, weight=1)
 
         header = ctk.CTkFrame(self, fg_color="transparent")
-        header.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        header.grid(row=0, column=0, sticky="ew", pady=(0, 4))
         header.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(header, text="免租期（可多段）", anchor="w").grid(
             row=0, column=0, sticky="w"
@@ -214,14 +241,20 @@ class FreePeriodsEditor(ctk.CTkFrame):
         ctk.CTkButton(header, text="添加时段", width=90, command=self.add_row).grid(
             row=0, column=1, sticky="e"
         )
+        ctk.CTkLabel(
+            self,
+            text="免租金额无需填写：按免租起止与计费月重叠天数比例自动计算（月租×重叠天数÷计费月天数）",
+            text_color="#6b7280",
+            anchor="w",
+            font=ctk.CTkFont(size=12),
+        ).grid(row=1, column=0, sticky="w", pady=(0, 6))
 
-        self.list_frame = ctk.CTkScrollableFrame(self, height=140)
-        self.list_frame.grid(row=1, column=0, sticky="nsew")
+        self.list_frame = _period_list_frame(self, grid_row=2)
         self.list_frame.grid_columnconfigure(1, weight=1)
         self.list_frame.grid_columnconfigure(2, weight=1)
 
         if initial:
-            for start, end in initial:
+            for start, end, *_rest in initial:
                 self.add_row(start, end)
         else:
             self._render_empty()
@@ -290,10 +323,6 @@ class FreePeriodsEditor(ctk.CTkFrame):
                 {
                     "start_var": start_var,
                     "end_var": end_var,
-                    "label": label,
-                    "start_picker": start_picker,
-                    "end_picker": end_picker,
-                    "remove_btn": remove_btn,
                 }
             )
         self._rows = rebuilt
@@ -322,8 +351,477 @@ class FreePeriodsEditor(ctk.CTkFrame):
         return periods
 
 
+class DiscountAddDialog(ctk.CTkToplevel):
+    """按租赁月周期添加折/减：统一选折扣或立减，支持一次添加连续多个月周期。"""
+
+    KIND_RATE_LABEL = "折扣"
+    KIND_AMOUNT_LABEL = "立减"
+    KIND_LABELS = (KIND_RATE_LABEL, KIND_AMOUNT_LABEL)
+
+    def __init__(
+        self,
+        master: tk.Misc,
+        *,
+        lease_start: date,
+        lease_end: date,
+        existing_months: set[tuple[int, int]],
+        monthly_rent: float,
+    ) -> None:
+        super().__init__(master)
+        self.title("添加折/减")
+        self.resizable(False, False)
+        self.transient(master)
+        self.grab_set()
+        self.result: list[tuple[date, date, str, str]] | None = None
+        self.lease_start = lease_start
+        self.lease_end = lease_end
+        self.existing_months = existing_months
+        self.monthly_rent = float(monthly_rent)
+
+        from app.ui.utils import iter_lease_billing_months
+
+        self.billing_months = iter_lease_billing_months(lease_start, lease_end)
+
+        width, height = 420, 360
+        self.geometry(f"{width}x{height}")
+        center_window(self, width, height)
+
+        body = ctk.CTkFrame(self, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=20, pady=(18, 10))
+        body.grid_columnconfigure(1, weight=1)
+
+        month_choices = [
+            f"{s.year:04d}-{s.month:02d}" for s, _e in self.billing_months
+        ]
+        if not month_choices:
+            month_choices = [f"{lease_start.year:04d}-{lease_start.month:02d}"]
+        default_month = month_choices[0]
+
+        self.kind_var = ctk.StringVar(value=self.KIND_RATE_LABEL)
+        self.value_var = ctk.StringVar(value="")
+        self.start_month_var = ctk.StringVar(value=default_month)
+        self.end_month_var = ctk.StringVar(value=default_month)
+
+        def add_row(row: int, label: str, widget: tk.Misc) -> None:
+            ctk.CTkLabel(body, text=label, anchor="w", width=90).grid(
+                row=row, column=0, sticky="w", pady=8, padx=(0, 8)
+            )
+            widget.grid(row=row, column=1, sticky="ew", pady=8)
+
+        add_row(
+            0,
+            "类型",
+            ctk.CTkOptionMenu(
+                body, values=list(self.KIND_LABELS), variable=self.kind_var, width=200
+            ),
+        )
+        add_row(
+            1,
+            "数值",
+            ctk.CTkEntry(
+                body,
+                textvariable=self.value_var,
+                placeholder_text="折扣如 0.85；立减如 200",
+            ),
+        )
+        add_row(
+            2,
+            "起始月份",
+            ctk.CTkOptionMenu(
+                body, values=month_choices, variable=self.start_month_var, width=200
+            ),
+        )
+        add_row(
+            3,
+            "结束月份",
+            ctk.CTkOptionMenu(
+                body, values=month_choices, variable=self.end_month_var, width=200
+            ),
+        )
+        example_end = (
+            self.billing_months[0][1].isoformat()
+            if self.billing_months
+            else lease_end.isoformat()
+        )
+        ctk.CTkLabel(
+            body,
+            text=(
+                f"按租赁月周期添加（起租日对齐）；"
+                f"如选 {lease_start.year:04d}-{lease_start.month:02d} "
+                f"对应 {lease_start.isoformat()} ~ {example_end}；"
+                f"立减不得超过该月周期应缴（非完整月按天折算，完整月上限 {self.monthly_rent:g}）"
+            ),
+            text_color="#6b7280",
+            anchor="w",
+            font=ctk.CTkFont(size=12),
+            wraplength=360,
+        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(4, 0))
+
+        bar = ctk.CTkFrame(self, fg_color="transparent")
+        bar.pack(fill="x", padx=20, pady=(0, 16))
+        ctk.CTkButton(
+            bar, text="取消", width=90, fg_color="#6b7280", command=self.destroy
+        ).pack(side="right", padx=(8, 0))
+        ctk.CTkButton(bar, text="添加", width=90, command=self._on_ok).pack(side="right")
+
+    @staticmethod
+    def _parse_month(text: str, field_name: str) -> tuple[int, int]:
+        raw = (text or "").strip()
+        try:
+            year_s, month_s = raw.split("-", 1)
+            year, month = int(year_s), int(month_s)
+            if not (1 <= month <= 12):
+                raise ValueError
+            return year, month
+        except ValueError as exc:
+            raise ValueError(f"{field_name}格式应为 YYYY-MM") from exc
+
+    def _on_ok(self) -> None:
+        from app.models import DISCOUNT_KIND_AMOUNT, DISCOUNT_KIND_RATE
+        from app.ui.utils import parse_float, show_error
+
+        try:
+            value_text = self.value_var.get().strip()
+            if not value_text:
+                raise ValueError("折/减数值不能为空")
+            kind_label = self.kind_var.get().strip()
+            if kind_label == self.KIND_AMOUNT_LABEL:
+                kind = DISCOUNT_KIND_AMOUNT
+            else:
+                kind = DISCOUNT_KIND_RATE
+            numeric = parse_float(value_text, "折/减数值")
+            if kind == DISCOUNT_KIND_RATE and not (0 < numeric < 1):
+                raise ValueError("折扣须大于 0 且小于 1（如 0.85 表示实付 85%）")
+            if kind == DISCOUNT_KIND_AMOUNT and numeric <= 0:
+                raise ValueError("立减金额须大于 0")
+
+            start_y, start_m = self._parse_month(self.start_month_var.get(), "起始月份")
+            end_y, end_m = self._parse_month(self.end_month_var.get(), "结束月份")
+            if (end_y, end_m) < (start_y, start_m):
+                raise ValueError("结束月份不能早于起始月份")
+
+            from app.ui.utils import billing_month_gross_rent
+
+            rows: list[tuple[date, date, str, str]] = []
+            for slice_start, slice_end in self.billing_months:
+                key = (slice_start.year, slice_start.month)
+                if key < (start_y, start_m) or key > (end_y, end_m):
+                    continue
+                if key in self.existing_months:
+                    continue
+                if kind == DISCOUNT_KIND_AMOUNT:
+                    cap = billing_month_gross_rent(
+                        self.monthly_rent,
+                        self.lease_start,
+                        slice_start,
+                        slice_end,
+                    )
+                    if numeric > cap + 1e-9:
+                        raise ValueError(
+                            f"立减金额不能超过该月周期应缴"
+                            f"（{slice_start} ~ {slice_end} 应缴 {cap:g}）"
+                        )
+                rows.append((slice_start, slice_end, kind, value_text))
+            if not rows:
+                raise ValueError("所选月份均已添加或不在租赁期内")
+            self.result = rows
+            self.destroy()
+        except Exception as exc:  # noqa: BLE001
+            show_error(str(exc))
+
+    def show(self) -> list[tuple[date, date, str, str]] | None:
+        self.wait_window()
+        return self.result
+
+
+class DiscountPeriodsEditor(ctk.CTkFrame):
+    """按租赁月周期添加折/减：统一选择折扣或立减，支持一次添加多个月周期。"""
+
+    KIND_RATE_LABEL = "折扣"
+    KIND_AMOUNT_LABEL = "立减"
+    KIND_LABELS = (KIND_RATE_LABEL, KIND_AMOUNT_LABEL)
+
+    def __init__(
+        self,
+        master: tk.Misc,
+        initial: Optional[Sequence[tuple[str, str, str, str]]] = None,
+        *,
+        lease_start_var: Optional[tk.StringVar] = None,
+        lease_end_var: Optional[tk.StringVar] = None,
+        monthly_rent_var: Optional[tk.StringVar] = None,
+        **kwargs,
+    ) -> None:
+        super().__init__(master, fg_color="transparent", **kwargs)
+        self._rows: list[dict[str, object]] = []
+        self.lease_start_var = lease_start_var
+        self.lease_end_var = lease_end_var
+        self.monthly_rent_var = monthly_rent_var
+        self.grid_columnconfigure(0, weight=1)
+
+        header = ctk.CTkFrame(self, fg_color="transparent")
+        header.grid(row=0, column=0, sticky="ew", pady=(0, 4))
+        header.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(header, text="折/减（月周期）", anchor="w").grid(
+            row=0, column=0, sticky="w"
+        )
+        ctk.CTkButton(header, text="添加月份", width=90, command=self.open_add_dialog).grid(
+            row=0, column=1, sticky="e"
+        )
+        ctk.CTkLabel(
+            self,
+            text="按起租日对齐的租赁月周期添加；立减不得超过该月周期应缴（非完整月按天折算）",
+            text_color="#6b7280",
+            anchor="w",
+            font=ctk.CTkFont(size=12),
+        ).grid(row=1, column=0, sticky="w", pady=(0, 6))
+
+        self.list_frame = _period_list_frame(self, grid_row=2)
+        self.list_frame.grid_columnconfigure(2, weight=1)
+
+        if initial:
+            for start, end, kind, value in initial:
+                self._append_row(
+                    str(start)[:10],
+                    str(end)[:10],
+                    self._kind_label(kind),
+                    str(value),
+                )
+            self._rebuild()
+        else:
+            self._render_empty()
+
+    def _kind_label(self, kind: str) -> str:
+        if kind in self.KIND_LABELS:
+            return kind
+        if kind == "rate" or kind == self.KIND_RATE_LABEL:
+            return self.KIND_RATE_LABEL
+        if kind == "amount" or kind == self.KIND_AMOUNT_LABEL:
+            return self.KIND_AMOUNT_LABEL
+        # 兼容旧文案「折扣率」
+        if kind == "折扣率":
+            return self.KIND_RATE_LABEL
+        return self.KIND_RATE_LABEL
+
+    def _append_row(
+        self, start: str, end: str, kind_label: str, value: str
+    ) -> None:
+        self._rows.append(
+            {
+                "start_var": ctk.StringVar(value=start),
+                "end_var": ctk.StringVar(value=end),
+                "kind_var": ctk.StringVar(value=kind_label),
+                "value_var": ctk.StringVar(value=value),
+            }
+        )
+
+    def _existing_months(self) -> set[tuple[int, int]]:
+        months: set[tuple[int, int]] = set()
+        for item in self._rows:
+            start_var = item["start_var"]
+            assert isinstance(start_var, ctk.StringVar)
+            text = start_var.get().strip()
+            if len(text) >= 7:
+                try:
+                    year, month = int(text[:4]), int(text[5:7])
+                    months.add((year, month))
+                except ValueError:
+                    continue
+        return months
+
+    def _lease_bounds(self) -> tuple[date, date]:
+        from app.ui.utils import parse_date
+
+        if self.lease_start_var is None or self.lease_end_var is None:
+            raise ValueError("请先填写起租时间与到期时间")
+        start = parse_date(self.lease_start_var.get(), "起租时间")
+        end = parse_date(self.lease_end_var.get(), "到期时间")
+        if end < start:
+            raise ValueError("到期时间不能早于起租时间")
+        return start, end
+
+    def _monthly_rent(self) -> float:
+        from app.ui.utils import parse_float
+
+        if self.monthly_rent_var is None:
+            raise ValueError("请先填写月租金")
+        rent = parse_float(self.monthly_rent_var.get(), "月租金")
+        if rent < 0:
+            raise ValueError("月租金不能为负数")
+        return rent
+
+    def open_add_dialog(self) -> None:
+        from app.ui.utils import show_error
+
+        try:
+            lease_start, lease_end = self._lease_bounds()
+            monthly_rent = self._monthly_rent()
+        except ValueError as exc:
+            show_error(str(exc))
+            return
+        dialog = DiscountAddDialog(
+            self,
+            lease_start=lease_start,
+            lease_end=lease_end,
+            existing_months=self._existing_months(),
+            monthly_rent=monthly_rent,
+        )
+        rows = dialog.show()
+        if not rows:
+            return
+        for start, end, kind, value in rows:
+            self._append_row(
+                start.isoformat(),
+                end.isoformat(),
+                self._kind_label(kind),
+                value,
+            )
+        self._rows.sort(
+            key=lambda item: str(item["start_var"].get())  # type: ignore[union-attr]
+        )
+        self._rebuild()
+
+    def _render_empty(self) -> None:
+        if self._rows:
+            return
+        for child in self.list_frame.winfo_children():
+            child.destroy()
+        ctk.CTkLabel(
+            self.list_frame,
+            text="暂无折/减，可点击「添加月份」",
+            text_color="#9ca3af",
+        ).grid(row=0, column=0, columnspan=5, sticky="w", pady=8)
+
+    def _rebuild(self) -> None:
+        for child in self.list_frame.winfo_children():
+            child.destroy()
+        if not self._rows:
+            self._render_empty()
+            return
+        rebuilt: list[dict[str, object]] = []
+        for idx, item in enumerate(self._rows):
+            start_var = item["start_var"]
+            end_var = item["end_var"]
+            kind_var = item["kind_var"]
+            value_var = item["value_var"]
+            assert isinstance(start_var, ctk.StringVar)
+            assert isinstance(end_var, ctk.StringVar)
+            assert isinstance(kind_var, ctk.StringVar)
+            assert isinstance(value_var, ctk.StringVar)
+
+            start_text = start_var.get().strip()
+            end_text = end_var.get().strip()
+            if start_text and end_text:
+                period_text = f"{start_text}\u00a0~\u00a0{end_text}"
+            else:
+                period_text = start_text[:7] if start_text else "—"
+            label = ctk.CTkLabel(self.list_frame, text=f"{idx + 1}", width=28)
+            month_label = ctk.CTkLabel(
+                self.list_frame, text=period_text, width=168, anchor="w"
+            )
+            kind_menu = ctk.CTkOptionMenu(
+                self.list_frame,
+                values=list(self.KIND_LABELS),
+                variable=kind_var,
+                width=84,
+            )
+            value_entry = ctk.CTkEntry(
+                self.list_frame,
+                textvariable=value_var,
+                placeholder_text="如 0.85 / 200",
+                width=100,
+            )
+
+            def make_remove(target_var: ctk.StringVar):
+                def _remove() -> None:
+                    self._rows = [
+                        row for row in self._rows if row["start_var"] is not target_var
+                    ]
+                    self._rebuild()
+
+                return _remove
+
+            remove_btn = ctk.CTkButton(
+                self.list_frame,
+                text="删除",
+                width=56,
+                fg_color="#b91c1c",
+                command=make_remove(start_var),
+            )
+            label.grid(row=idx, column=0, padx=(0, 4), pady=4, sticky="w")
+            month_label.grid(row=idx, column=1, padx=2, pady=4, sticky="w")
+            kind_menu.grid(row=idx, column=2, padx=2, pady=4, sticky="w")
+            value_entry.grid(row=idx, column=3, padx=2, pady=4, sticky="ew")
+            remove_btn.grid(row=idx, column=4, padx=(4, 0), pady=4, sticky="e")
+            rebuilt.append(
+                {
+                    "start_var": start_var,
+                    "end_var": end_var,
+                    "kind_var": kind_var,
+                    "value_var": value_var,
+                }
+            )
+        self._rows = rebuilt
+
+    def get_discounts(self) -> list[tuple[date, date, str, float]]:
+        from app.models import DISCOUNT_KIND_AMOUNT, DISCOUNT_KIND_RATE
+        from app.ui.utils import billing_month_gross_rent, parse_date, parse_float
+
+        monthly_rent = self._monthly_rent()
+        lease_bounds: tuple[date, date] | None = None
+        discounts: list[tuple[date, date, str, float]] = []
+        for idx, item in enumerate(self._rows, start=1):
+            start_var = item["start_var"]
+            end_var = item["end_var"]
+            kind_var = item["kind_var"]
+            value_var = item["value_var"]
+            assert isinstance(start_var, ctk.StringVar)
+            assert isinstance(end_var, ctk.StringVar)
+            assert isinstance(kind_var, ctk.StringVar)
+            assert isinstance(value_var, ctk.StringVar)
+            start_text = start_var.get().strip()
+            end_text = end_var.get().strip()
+            value_text = value_var.get().strip()
+            if not start_text and not end_text and not value_text:
+                continue
+            if not start_text or not end_text:
+                raise ValueError(f"第 {idx} 条折/减月份不完整")
+            if not value_text:
+                raise ValueError(f"第 {idx} 条折/减数值不能为空")
+            kind_label = kind_var.get().strip()
+            if kind_label == self.KIND_AMOUNT_LABEL:
+                kind = DISCOUNT_KIND_AMOUNT
+            else:
+                kind = DISCOUNT_KIND_RATE
+            numeric = parse_float(value_text, f"第 {idx} 条折/减数值")
+            if kind == DISCOUNT_KIND_RATE and not (0 < numeric < 1):
+                raise ValueError(
+                    f"第 {idx} 条折扣须大于 0 且小于 1（如 0.85 表示实付 85%）"
+                )
+            if kind == DISCOUNT_KIND_AMOUNT and numeric <= 0:
+                raise ValueError(f"第 {idx} 条立减金额须大于 0")
+            d_start = parse_date(start_text, f"第 {idx} 条折/减起")
+            d_end = parse_date(end_text, f"第 {idx} 条折/减止")
+            if kind == DISCOUNT_KIND_AMOUNT:
+                if lease_bounds is None:
+                    lease_bounds = self._lease_bounds()
+                cap = billing_month_gross_rent(
+                    monthly_rent, lease_bounds[0], d_start, d_end
+                )
+                if numeric > cap + 1e-9:
+                    raise ValueError(
+                        f"第 {idx} 条立减金额不能超过该月周期应缴"
+                        f"（{d_start} ~ {d_end} 应缴 {cap:g}）"
+                    )
+            discounts.append((d_start, d_end, kind, numeric))
+        return discounts
+
+
 class DataTable(ctk.CTkFrame):
-    """带单元格边框的数据表格（表头/表体同宽对齐）+ 分页。"""
+    """带单元格边框的数据表格（表头/表体同宽对齐）+ 分页。
+
+    超长文本按列宽自动换行；时间区间使用不间断空格尽量保持整段。
+    列总宽超出可视区时底部提供横向滚动。
+    """
 
     PAGE_SIZE_OPTIONS = ("10", "20", "50", "100")
     BORDER_COLOR = "#94a3b8"
@@ -337,7 +835,7 @@ class DataTable(ctk.CTkFrame):
     EMPTY_FONT = ("PingFang SC", 11)
     CELL_PADX = 5
     CELL_PADY = 4
-    MAX_WRAP_LINES = 4
+    MAX_WRAP_LINES = 6
 
     def __init__(
         self,
@@ -350,17 +848,24 @@ class DataTable(ctk.CTkFrame):
         page_size: int = 20,
         enable_pagination: bool = True,
         emphasis_columns: Optional[Sequence[str]] = None,
+        fit_content_columns: Optional[Sequence[str]] = None,
+        cell_pady: int | None = None,
         **kwargs,
     ) -> None:
         super().__init__(master, fg_color="transparent", **kwargs)
         self._columns = list(columns)
         self._anchors = column_anchors or {}
         self._on_select = on_select
-        self._base_rowheight = rowheight
-        self._current_rowheight = rowheight
+        self._base_rowheight = max(22, int(rowheight))
+        self._current_rowheight = self._base_rowheight
         self._enable_pagination = enable_pagination
         # 若指定，标签前景色/加粗仅作用于这些列；背景色仍整行生效
         self._emphasis_columns = set(emphasis_columns or [])
+        # 按当前页正文单行宽度撑开列宽（不换行；超出可视区时横向滚动）
+        self._fit_content_columns = set(fit_content_columns or [])
+        self._cell_pady = (
+            self.CELL_PADY if cell_pady is None else max(0, int(cell_pady))
+        )
         self.page_size = max(1, int(page_size))
         self.page = 1
         self._all_rows: list[list[object]] = []
@@ -371,12 +876,16 @@ class DataTable(ctk.CTkFrame):
         self._row_widgets: dict[str, list[tk.Frame]] = {}
         self._header_cells: list[tk.Frame] = []
         self._style_prefix = style_prefix
-        self._col_minsizes = [max(40, int(width)) for _, _, width in self._columns]
+        self._declared_widths = [max(40, int(width)) for _, _, width in self._columns]
+        self._col_minsizes = list(self._declared_widths)
+        self._table_content_width = sum(self._col_minsizes)
+        self._cell_font = tkfont.Font(font=self.CELL_FONT)
+        self._header_font = tkfont.Font(font=self.HEADER_FONT)
 
         self.grid_rowconfigure(0, weight=1)
         self.grid_columnconfigure(0, weight=1)
 
-        # 外层边框容器：表头置顶，表体紧贴表头
+        # 外层边框：表头 / 表体 / 底栏横向滚动
         table_wrap = tk.Frame(
             self,
             bg=self.BORDER_COLOR,
@@ -387,46 +896,61 @@ class DataTable(ctk.CTkFrame):
         )
         table_wrap.grid(row=0, column=0, sticky="nsew")
         self.table_wrap = table_wrap
+        table_wrap.grid_rowconfigure(1, weight=1)
+        table_wrap.grid_columnconfigure(0, weight=1)
 
-        # 顶栏：表头置顶；网格线由父级背景色露出
-        self.header_bar = tk.Frame(table_wrap, bg=self.BORDER_COLOR, bd=0, highlightthickness=0)
-        self.header_bar.pack(side="top", fill="x")
-        self.header_bar.grid_columnconfigure(0, weight=1)
-        self.header_bar.grid_columnconfigure(1, minsize=self.SCROLL_GUTTER, weight=0)
-
-        self.header = tk.Frame(self.header_bar, bg=self.BORDER_COLOR, bd=0, highlightthickness=0)
-        self.header.grid(row=0, column=0, sticky="nsew")
-        self._build_header_cells()
-
+        self.header_canvas = tk.Canvas(
+            table_wrap,
+            background=self.HEADER_BG,
+            highlightthickness=0,
+            bd=0,
+            height=self._header_min_height(),
+        )
+        self.header_canvas.grid(row=0, column=0, sticky="ew")
         self.header_gutter = tk.Frame(
-            self.header_bar,
+            table_wrap,
             bg=self.HEADER_BG,
             width=self.SCROLL_GUTTER,
             bd=0,
             highlightthickness=0,
         )
-        self.header_gutter.grid(row=0, column=1, sticky="nsew")
+        self.header_gutter.grid(row=0, column=1, sticky="ns")
         self.header_gutter.grid_propagate(False)
 
-        # 表体紧贴表头下方（零间距），外框底边由 table_wrap.highlightthickness 保证
-        self.body_bar = tk.Frame(table_wrap, bg=self.BORDER_COLOR, bd=0, highlightthickness=0)
-        self.body_bar.pack(side="top", fill="both", expand=True, pady=0)
-        self.body_bar.grid_rowconfigure(0, weight=1)
-        self.body_bar.grid_columnconfigure(0, weight=1)
-        self.body_bar.grid_columnconfigure(1, minsize=self.SCROLL_GUTTER, weight=0)
+        self.header = tk.Frame(
+            self.header_canvas, bg=self.BORDER_COLOR, bd=0, highlightthickness=0
+        )
+        self._header_window = self.header_canvas.create_window(
+            (0, 0), window=self.header, anchor="nw", tags=("header",)
+        )
+        self._build_header_cells()
 
         self.canvas = tk.Canvas(
-            self.body_bar,
+            table_wrap,
             background=self.ROW_BG,
             highlightthickness=0,
             bd=0,
         )
-        self.canvas.grid(row=0, column=0, sticky="nsew")
+        self.canvas.grid(row=1, column=0, sticky="nsew")
         self.scrollbar = ttk.Scrollbar(
-            self.body_bar, orient="vertical", command=self.canvas.yview
+            table_wrap, orient="vertical", command=self.canvas.yview
         )
-        self.scrollbar.grid(row=0, column=1, sticky="ns")
+        self.scrollbar.grid(row=1, column=1, sticky="ns")
         self.canvas.configure(yscrollcommand=self.scrollbar.set)
+
+        self.h_scrollbar = ttk.Scrollbar(
+            table_wrap, orient="horizontal", command=self._xview_both
+        )
+        self.h_scrollbar.grid(row=2, column=0, sticky="ew")
+        self._hscroll_corner = tk.Frame(
+            table_wrap,
+            bg=self.HEADER_BG,
+            width=self.SCROLL_GUTTER,
+            bd=0,
+            highlightthickness=0,
+        )
+        self._hscroll_corner.grid(row=2, column=1, sticky="nsew")
+        self._hscroll_corner.grid_propagate(False)
 
         # 使用 tk.Frame 作为画布窗口，避免 CTk 嵌入偏移导致与表头脱节
         self.body = tk.Frame(self.canvas, bg=self.ROW_BG, bd=0, highlightthickness=0)
@@ -434,16 +958,20 @@ class DataTable(ctk.CTkFrame):
             (0, 0), window=self.body, anchor="nw", tags=("body",)
         )
         self.body.bind("<Configure>", self._on_body_configure)
+        self.header.bind("<Configure>", self._on_header_configure)
         self.canvas.bind("<Configure>", self._on_canvas_configure)
+        self.header_canvas.bind("<Configure>", self._on_header_canvas_configure)
         self.table_wrap.bind("<Configure>", self._on_table_configure)
+        self.canvas.configure(xscrollcommand=self._on_body_xscroll)
+        self.header_canvas.configure(xscrollcommand=self._on_header_xscroll)
+
         # 仅绑定本表控件，避免 CTk 禁用的 bind_all，也避免全局滚动副作用
         self._bind_wheel(self.canvas)
         self._bind_wheel(self.body)
         self._bind_wheel(self.table_wrap)
-        self._bind_wheel(self.header_bar)
+        self._bind_wheel(self.header_canvas)
         self._bind_wheel(self.header)
         self._bind_wheel(self.header_gutter)
-        self._bind_wheel(self.body_bar)
 
         self.tree = self  # 兼容 table.tree.tag_configure
 
@@ -458,22 +986,31 @@ class DataTable(ctk.CTkFrame):
 
     def _bind_wheel(self, widget: tk.Misc) -> None:
         widget.bind("<MouseWheel>", self._on_mousewheel, add="+")
+        widget.bind("<Shift-MouseWheel>", self._on_shift_mousewheel, add="+")
+
+    def _scroll_delta(self, event) -> int:
+        if getattr(event, "delta", 0):
+            # macOS 触控板 delta 常为小整数；Windows 多为 ±120
+            if abs(event.delta) >= 120:
+                return int(-1 * (event.delta / 120))
+            return -1 if event.delta > 0 else 1
+        return -1 if getattr(event, "num", 0) == 4 else 1
 
     def _on_mousewheel(self, event) -> str:
         if not self.canvas.winfo_exists():
             return "break"
         if not self._can_vertically_scroll():
             return "break"
-        if getattr(event, "delta", 0):
-            # macOS 触控板 delta 常为小整数；Windows 多为 ±120
-            if abs(event.delta) >= 120:
-                delta = int(-1 * (event.delta / 120))
-            else:
-                delta = -1 if event.delta > 0 else 1
-        else:
-            delta = -1 if getattr(event, "num", 0) == 4 else 1
-        self.canvas.yview_scroll(delta, "units")
+        self.canvas.yview_scroll(self._scroll_delta(event), "units")
         self._pin_body_window()
+        return "break"
+
+    def _on_shift_mousewheel(self, event) -> str:
+        if not self.canvas.winfo_exists():
+            return "break"
+        if not self._can_horizontally_scroll():
+            return "break"
+        self._xview_both("scroll", self._scroll_delta(event), "units")
         return "break"
 
     def _can_vertically_scroll(self) -> bool:
@@ -483,14 +1020,36 @@ class DataTable(ctk.CTkFrame):
         except tk.TclError:
             return False
 
+    def _can_horizontally_scroll(self) -> bool:
+        try:
+            first, last = self.canvas.xview()
+            return not (first <= 0.0 and last >= 1.0)
+        except tk.TclError:
+            return False
+
+    def _xview_both(self, *args) -> None:
+        self.canvas.xview(*args)
+        self.header_canvas.xview(*args)
+
+    def _on_body_xscroll(self, first: str, last: str) -> None:
+        self.h_scrollbar.set(first, last)
+        if self.header_canvas.xview() != (float(first), float(last)):
+            self.header_canvas.xview_moveto(float(first))
+
+    def _on_header_xscroll(self, first: str, last: str) -> None:
+        self.h_scrollbar.set(first, last)
+        if self.canvas.xview() != (float(first), float(last)):
+            self.canvas.xview_moveto(float(first))
+
     def _pin_body_window(self) -> None:
         """将表体窗口钉在画布坐标原点，并固定 scrollregion，避免滚动后与表头脱节。"""
         if not self.canvas.winfo_exists():
             return
         self.canvas.coords(self._canvas_window, 0, 0)
         self.body.update_idletasks()
-        width = max(self.canvas.winfo_width(), self.body.winfo_reqwidth(), 1)
+        width = max(self._table_content_width, self.body.winfo_reqwidth(), 1)
         height = max(self.body.winfo_reqheight(), 1)
+        self.canvas.itemconfigure(self._canvas_window, width=width)
         # 强制从 (0,0) 起算，避免 bbox 漂移留下顶部空隙
         self.canvas.configure(scrollregion=(0, 0, width, height))
         # 夹紧滚动位置，防止滚出内容区
@@ -499,14 +1058,38 @@ class DataTable(ctk.CTkFrame):
             self.canvas.yview_moveto(0)
         elif first > 0 and not self._can_vertically_scroll():
             self.canvas.yview_moveto(0)
+        self._pin_header_window()
+
+    def _header_min_height(self) -> int:
+        """表头最小高度：收紧内边距时跟正文走，避免表头区被托高后与表体脱节。"""
+        if self._cell_pady < self.CELL_PADY:
+            return max(18, int(self.CELL_FONT[1]) + 6 + self._cell_pady * 2)
+        return max(28, self._base_rowheight)
+
+    def _pin_header_window(self) -> None:
+        if not self.header_canvas.winfo_exists():
+            return
+        self.header_canvas.coords(self._header_window, 0, 0)
+        self.header.update_idletasks()
+        width = max(self._table_content_width, self.header.winfo_reqwidth(), 1)
+        content_h = max(self.header.winfo_reqheight(), 1)
+        height = max(content_h, self._header_min_height())
+        # 同步窗口高度，避免画布高于表头内容时底部露出空隙、与表体分离
+        self.header_canvas.itemconfigure(
+            self._header_window, width=width, height=height
+        )
+        self.header_canvas.configure(height=height, scrollregion=(0, 0, width, height))
 
     def _build_header_cells(self) -> None:
         for child in self.header.winfo_children():
             child.destroy()
         self._header_cells.clear()
         col_count = len(self._columns)
+        self.header.grid_rowconfigure(0, weight=1)
         for idx, (_col_id, heading, _) in enumerate(self._columns):
-            self.header.grid_columnconfigure(idx, weight=1, minsize=self._col_minsizes[idx])
+            self.header.grid_columnconfigure(
+                idx, weight=0, minsize=self._col_minsizes[idx]
+            )
             # 父级背景作网格线：右侧/底部分隔 1px
             cell = tk.Frame(self.header, bg=self.HEADER_BG, bd=0, highlightthickness=0)
             cell.grid(
@@ -525,12 +1108,13 @@ class DataTable(ctk.CTkFrame):
                 font=self.HEADER_FONT,
                 anchor="center",
                 justify="center",
+                wraplength=0,
             )
             label.pack(
                 fill="both",
                 expand=True,
                 padx=self.CELL_PADX,
-                pady=self.CELL_PADY,
+                pady=self._cell_pady,
             )
             self._header_cells.append(cell)
             self._bind_wheel(cell)
@@ -538,37 +1122,228 @@ class DataTable(ctk.CTkFrame):
 
     def _apply_column_minsizes(self) -> None:
         for idx, minsize in enumerate(self._col_minsizes):
-            self.header.grid_columnconfigure(idx, weight=1, minsize=minsize)
-            self.body.grid_columnconfigure(idx, weight=1, minsize=minsize)
+            self.header.grid_columnconfigure(idx, weight=0, minsize=minsize)
+            self.body.grid_columnconfigure(idx, weight=0, minsize=minsize)
+
+    def _measure_text_width(self, text: str, *, header: bool = False) -> int:
+        font = self._header_font if header else self._cell_font
+        if not text:
+            return 0
+        return max(font.measure(line) for line in str(text).split("\n"))
+
+    def _is_fit_content_col(self, col_idx: int) -> bool:
+        if col_idx < 0 or col_idx >= len(self._columns):
+            return False
+        return self._columns[col_idx][0] in self._fit_content_columns
+
+    def _base_col_widths(self) -> list[int]:
+        """列宽下限：声明宽度与表头取大；fit_content 列再按当前页正文单行宽度撑开。"""
+        widths = list(self._declared_widths)
+        page_rows = self._page_rows()
+        for idx, (col_id, heading, _) in enumerate(self._columns):
+            needed = (
+                self._measure_text_width(heading, header=True) + self.CELL_PADX * 2 + 4
+            )
+            widths[idx] = max(widths[idx], needed)
+            if col_id not in self._fit_content_columns:
+                continue
+            for row in page_rows:
+                text = self._cell_plain_text(row[idx] if idx < len(row) else "")
+                content = self._measure_text_width(text) + self.CELL_PADX * 2 + 4
+                widths[idx] = max(widths[idx], content)
+        return widths
+
+    def _col_wraplength(self, col_idx: int) -> int:
+        if self._is_fit_content_col(col_idx):
+            return 0
+        minsize = (
+            self._col_minsizes[col_idx]
+            if col_idx < len(self._col_minsizes)
+            else 80
+        )
+        return max(40, minsize - self.CELL_PADX * 2 - 2)
+
+    def _chars_per_line(self, col_idx: int) -> int:
+        if self._is_fit_content_col(col_idx):
+            return 10_000
+        char_px = max(8, int(self.CELL_FONT[1]))
+        return max(4, self._col_wraplength(col_idx) // char_px)
+
+    def _estimate_lines(self, text: str, col_idx: int) -> int:
+        if not text:
+            return 1
+        if self._is_fit_content_col(col_idx):
+            return 1
+        per_line = self._chars_per_line(col_idx)
+        total = 0
+        for part in str(text).split("\n"):
+            total += max(1, (len(part) + per_line - 1) // per_line)
+        return min(self.MAX_WRAP_LINES, max(1, total))
+
+    @staticmethod
+    def _cell_plain_text(value: object) -> str:
+        """将单元格值转为纯文本（支持富文本分段）。"""
+        if value is None:
+            return ""
+        if isinstance(value, (list, tuple)) and not isinstance(value, (str, bytes)):
+            parts: list[str] = []
+            for seg in value:
+                if isinstance(seg, tuple):
+                    parts.append("" if seg[0] is None else str(seg[0]))
+                else:
+                    parts.append("" if seg is None else str(seg))
+            return "".join(parts)
+        return str(value)
+
+    @staticmethod
+    def _cell_segments(value: object) -> list[tuple[str, str | None]]:
+        """解析单元格富文本：[(text, fg|None), ...]。"""
+        if value is None:
+            return [("", None)]
+        if isinstance(value, (list, tuple)) and not isinstance(value, (str, bytes)):
+            segs: list[tuple[str, str | None]] = []
+            for seg in value:
+                if isinstance(seg, tuple):
+                    text = "" if seg[0] is None else str(seg[0])
+                    color = seg[1] if len(seg) > 1 else None
+                    segs.append((text, None if color is None else str(color)))
+                else:
+                    segs.append(("" if seg is None else str(seg), None))
+            return segs or [("", None)]
+        return [(str(value), None)]
 
     def _sync_column_widths(self, *_args) -> None:
-        """按可用宽度比例分配列宽，表头与表体使用相同 minsize。"""
+        """按声明比例分配列宽；fit_content 列按正文收紧，不参与多余宽度分摊。"""
         available = self.canvas.winfo_width()
         if available <= 1:
-            available = self.header.winfo_width()
+            available = max(1, self.table_wrap.winfo_width() - self.SCROLL_GUTTER - 2)
         if available <= 1:
             return
-        weights = [max(1, w) for _, _, w in self._columns]
-        total = sum(weights)
-        sizes = [max(40, int(available * w / total)) for w in weights]
-        diff = available - sum(sizes)
-        if sizes:
-            sizes[-1] = max(40, sizes[-1] + diff)
-        self._col_minsizes = sizes
+
+        preferred = self._base_col_widths()
+        content_width = sum(preferred)
+        if content_width <= available and preferred:
+            extra = available - content_width
+            weights = [
+                0 if self._is_fit_content_col(idx) else decl
+                for idx, decl in enumerate(self._declared_widths)
+            ]
+            weight_total = sum(weights)
+            if weight_total > 0 and extra > 0:
+                grown = [
+                    w + int(extra * wt / weight_total)
+                    for w, wt in zip(preferred, weights)
+                ]
+                # 余数补给最后一个可伸缩列，避免总宽少于可视区
+                for idx in range(len(grown) - 1, -1, -1):
+                    if weights[idx] > 0:
+                        grown[idx] += available - sum(grown)
+                        break
+                preferred = [max(40, w) for w in grown]
+                content_width = available
+            else:
+                content_width = sum(preferred)
+
+        self._col_minsizes = preferred
+        self._table_content_width = max(content_width, 1)
         self._apply_column_minsizes()
-        self.canvas.itemconfigure(self._canvas_window, width=available)
         self._apply_wraplengths()
+        self._refresh_row_heights()
         self._pin_body_window()
+        self._update_hscroll_visibility()
+
+    def _apply_wraplengths(self) -> None:
+        """列宽变化后同步换行宽度，超长文本可折行。"""
+        for idx, cell in enumerate(self._header_cells):
+            wrap = self._col_wraplength(idx)
+            for child in cell.winfo_children():
+                if isinstance(child, tk.Label):
+                    try:
+                        child.configure(wraplength=wrap)
+                    except tk.TclError:
+                        pass
+        for cells in self._row_widgets.values():
+            for col_idx, cell in enumerate(cells):
+                wrap = self._col_wraplength(col_idx)
+                labels = [
+                    child
+                    for child in cell.winfo_children()
+                    if isinstance(child, tk.Label)
+                ]
+                if not labels:
+                    # 富文本：内层 frame 中的标签，仅最后一段参与换行
+                    for child in cell.winfo_children():
+                        nested = [
+                            n
+                            for n in child.winfo_children()
+                            if isinstance(n, tk.Label)
+                        ]
+                        if nested:
+                            for label in nested[:-1]:
+                                try:
+                                    label.configure(wraplength=0)
+                                except tk.TclError:
+                                    pass
+                            try:
+                                nested[-1].configure(wraplength=wrap)
+                            except tk.TclError:
+                                pass
+                    continue
+                for label in labels:
+                    try:
+                        label.configure(wraplength=wrap)
+                    except tk.TclError:
+                        pass
+
+    def _page_rows(self) -> list[list[object]]:
+        if self._enable_pagination:
+            start = (self.page - 1) * self.page_size
+            end = start + self.page_size
+            return self._all_rows[start:end]
+        return self._all_rows
+
+    def _refresh_row_heights(self) -> None:
+        if not self._row_widgets:
+            return
+        height = self._auto_rowheight_for(self._page_rows())
+        self._current_rowheight = height
+        for cells in self._row_widgets.values():
+            for cell in cells:
+                try:
+                    cell.configure(height=height)
+                except tk.TclError:
+                    pass
+
+    def _update_hscroll_visibility(self) -> None:
+        viewport = max(1, self.canvas.winfo_width())
+        if self._table_content_width > viewport + 1:
+            self.h_scrollbar.grid()
+            self._hscroll_corner.grid()
+        else:
+            self.h_scrollbar.grid_remove()
+            self._hscroll_corner.grid_remove()
+            self.canvas.xview_moveto(0)
+            self.header_canvas.xview_moveto(0)
 
     def _on_table_configure(self, _event=None) -> None:
         self._sync_column_widths()
 
     def _on_canvas_configure(self, event) -> None:
-        self.canvas.itemconfigure(self._canvas_window, width=max(1, event.width))
+        width = max(self._table_content_width, event.width, 1)
+        self.canvas.itemconfigure(self._canvas_window, width=width)
         self._pin_body_window()
+        self._update_hscroll_visibility()
+
+    def _on_header_canvas_configure(self, event) -> None:
+        width = max(self._table_content_width, event.width, 1)
+        self.header_canvas.itemconfigure(self._header_window, width=width)
+        self._pin_header_window()
 
     def _on_body_configure(self, _event=None) -> None:
         self._pin_body_window()
+
+    def _on_header_configure(self, _event=None) -> None:
+        self._pin_header_window()
 
     @staticmethod
     def _to_anchor(anchor: str) -> str:
@@ -636,39 +1411,21 @@ class DataTable(ctk.CTkFrame):
         self._render_page()
 
     def set_rowheight(self, rowheight: int) -> None:
-        self._base_rowheight = max(28, int(rowheight))
+        self._base_rowheight = max(22, int(rowheight))
         self._current_rowheight = self._base_rowheight
-
-    def _col_wraplength(self, col_idx: int) -> int:
-        minsize = (
-            self._col_minsizes[col_idx]
-            if col_idx < len(self._col_minsizes)
-            else 80
-        )
-        return max(40, minsize - self.CELL_PADX * 2 - 2)
-
-    def _chars_per_line(self, col_idx: int) -> int:
-        # 中文字号约等于像素宽度
-        char_px = max(8, int(self.CELL_FONT[1]))
-        return max(4, self._col_wraplength(col_idx) // char_px)
-
-    def _estimate_lines(self, text: str, col_idx: int) -> int:
-        if not text:
-            return 1
-        per_line = self._chars_per_line(col_idx)
-        total = 0
-        for part in str(text).split("\n"):
-            total += max(1, (len(part) + per_line - 1) // per_line)
-        return min(self.MAX_WRAP_LINES, max(1, total))
 
     def _auto_rowheight_for(self, rows: Sequence[Sequence[object]]) -> int:
         max_lines = 1
         for row in rows:
             for col_idx, cell in enumerate(row):
-                text = "" if cell is None else str(cell)
+                text = self._cell_plain_text(cell)
                 max_lines = max(max_lines, self._estimate_lines(text, col_idx))
+        # 收紧内边距时按正文字号估算行高，避免被默认 rowheight 托高导致上下留白
+        if self._cell_pady < self.CELL_PADY:
+            line_h = int(self.CELL_FONT[1]) + 4
+            return max(line_h * max_lines + self._cell_pady * 2, line_h)
         line_h = int(self.CELL_FONT[1]) + 7
-        return max(self._base_rowheight, line_h * max_lines + self.CELL_PADY * 2)
+        return max(self._base_rowheight, line_h * max_lines + self._cell_pady * 2)
 
     def _font_from_style(self, style: dict[str, object]) -> tuple:
         font_spec = style.get("font")
@@ -681,18 +1438,6 @@ class DataTable(ctk.CTkFrame):
                 return (family, size, "bold")
             return (family, size)
         return self.CELL_FONT
-
-    def _apply_wraplengths(self) -> None:
-        """列宽变化后同步换行宽度，避免文字被裁切。"""
-        for cells in self._row_widgets.values():
-            for col_idx, cell in enumerate(cells):
-                wrap = self._col_wraplength(col_idx)
-                for child in cell.winfo_children():
-                    if isinstance(child, tk.Label):
-                        try:
-                            child.configure(wraplength=wrap)
-                        except tk.TclError:
-                            pass
 
     def clear(self) -> None:
         for child in self.body.winfo_children():
@@ -731,11 +1476,17 @@ class DataTable(ctk.CTkFrame):
 
     def _set_cell_bg(self, cell: tk.Frame, bg: str) -> None:
         cell.configure(bg=bg)
-        for child in cell.winfo_children():
+
+        def _paint(widget: tk.Misc) -> None:
             try:
-                child.configure(bg=bg)
+                widget.configure(bg=bg)
             except tk.TclError:
                 pass
+            for child in widget.winfo_children():
+                _paint(child)
+
+        for child in cell.winfo_children():
+            _paint(child)
 
     def _select_row(self, iid: str) -> None:
         self._selected_iid = iid
@@ -750,7 +1501,7 @@ class DataTable(ctk.CTkFrame):
     def _make_cell(
         self,
         parent: tk.Misc,
-        text: str,
+        value: object,
         *,
         bg: str,
         fg: str,
@@ -770,22 +1521,54 @@ class DataTable(ctk.CTkFrame):
         if height is not None:
             cell.grid_propagate(False)
             cell.pack_propagate(False)
-        label = tk.Label(
-            cell,
-            text=text,
-            bg=bg,
-            fg=fg,
-            font=font,
-            anchor=self._to_anchor(anchor),
-            justify=self._to_justify(anchor),
-            wraplength=wraplength,
-        )
-        label.pack(
+
+        segments = self._cell_segments(value)
+        rich = len(segments) > 1 or any(color for _text, color in segments)
+        if not rich:
+            text = segments[0][0] if segments else ""
+            color = segments[0][1] if segments else None
+            label = tk.Label(
+                cell,
+                text=text,
+                bg=bg,
+                fg=color or fg,
+                font=font,
+                anchor=self._to_anchor(anchor),
+                justify=self._to_justify(anchor),
+                wraplength=wraplength,
+            )
+            label.pack(
+                fill="both",
+                expand=True,
+                padx=self.CELL_PADX,
+                pady=self._cell_pady,
+            )
+            return cell
+
+        inner = tk.Frame(cell, bg=bg, bd=0, highlightthickness=0)
+        inner.pack(
             fill="both",
             expand=True,
             padx=self.CELL_PADX,
-            pady=self.CELL_PADY,
+            pady=self._cell_pady,
         )
+        for idx, (text, color) in enumerate(segments):
+            is_last = idx == len(segments) - 1
+            label = tk.Label(
+                inner,
+                text=text,
+                bg=bg,
+                fg=color or fg,
+                font=font,
+                anchor=self._to_anchor(anchor) if idx == 0 else "w",
+                justify="left",
+                wraplength=wraplength if is_last else 0,
+                bd=0,
+                highlightthickness=0,
+                padx=0,
+                pady=0,
+            )
+            label.pack(side="left", fill="y", padx=0, pady=0)
         return cell
 
     def _render_page(self) -> None:
@@ -802,6 +1585,8 @@ class DataTable(ctk.CTkFrame):
         page_rows = self._all_rows[start:end]
         page_iids = self._all_iids[start:end]
         page_tags = self._all_tags[start:end]
+        # 先按当前可视宽度算列宽，再估行高，保证超长文本换行后不被裁切
+        self._sync_column_widths()
         self._current_rowheight = self._auto_rowheight_for(page_rows)
 
         self.clear()
@@ -840,10 +1625,9 @@ class DataTable(ctk.CTkFrame):
                     emphasize = (
                         not self._emphasis_columns or col_id in self._emphasis_columns
                     )
-                    raw = "" if value is None else str(value)
                     cell = self._make_cell(
                         self.body,
-                        raw,
+                        value,
                         bg=bg,
                         fg=fg if emphasize else "#111827",
                         font=font if emphasize else self.CELL_FONT,
@@ -858,10 +1642,16 @@ class DataTable(ctk.CTkFrame):
                         padx=(0, 0 if col_idx == col_count - 1 else 1),
                         pady=(0, 1),
                     )
-                    label = cell.winfo_children()[0]
-                    for widget in (cell, label):
-                        widget.bind("<Button-1>", lambda _e, i=iid: self._select_row(i))
+
+                    def _bind_tree(widget: tk.Misc, row_iid: str = iid) -> None:
+                        widget.bind(
+                            "<Button-1>", lambda _e, i=row_iid: self._select_row(i)
+                        )
                         self._bind_wheel(widget)
+                        for child in widget.winfo_children():
+                            _bind_tree(child, row_iid)
+
+                    _bind_tree(cell)
                     cells.append(cell)
                 self._row_widgets[iid] = cells
                 if self._selected_iid == iid:
@@ -898,12 +1688,27 @@ class DataTable(ctk.CTkFrame):
 
 
 class FormDialog(ctk.CTkToplevel):
-    def __init__(self, master: tk.Misc, title: str, width: int = 460, height: int = 420) -> None:
+    def __init__(
+        self,
+        master: tk.Misc,
+        title: str,
+        width: int = 460,
+        height: int = 420,
+        *,
+        scrollable: bool = False,
+    ) -> None:
         super().__init__(master)
         self.title(title)
-        self.resizable(False, False)
+        self.resizable(False, bool(scrollable))
         self.transient(master)
         self.withdraw()
+        try:
+            screen_h = int(self.winfo_screenheight())
+            height = min(height, max(420, screen_h - 100))
+        except tk.TclError:
+            pass
+        self._dialog_width = width
+        self._dialog_height = height
         self.geometry(f"{width}x{height}")
         center_window(self, width, height)
         self.deiconify()
@@ -912,7 +1717,11 @@ class FormDialog(ctk.CTkToplevel):
         self.result: Optional[dict] = None
 
         self.grid_columnconfigure(0, weight=1)
-        self.body = ctk.CTkFrame(self, fg_color="transparent")
+        self.grid_rowconfigure(0, weight=1)
+        if scrollable:
+            self.body = ctk.CTkScrollableFrame(self, fg_color="transparent")
+        else:
+            self.body = ctk.CTkFrame(self, fg_color="transparent")
         self.body.grid(row=0, column=0, sticky="nsew", padx=20, pady=(20, 10))
         self.body.grid_columnconfigure(1, weight=1)
 

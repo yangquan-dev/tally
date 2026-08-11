@@ -68,10 +68,43 @@ class Room:
 class FreePeriod:
     start_date: date
     end_date: date
+    amount: float = 0.0  # 兼容旧库字段；免租费用按起止日期自动计算
     id: int = 0
 
     def label(self) -> str:
-        return f"{self.start_date.isoformat()} ~ {self.end_date.isoformat()}"
+        # 使用不间断空格，保证同一起止区间不中途折行
+        return f"{self.start_date.isoformat()}\u00a0~\u00a0{self.end_date.isoformat()}"
+
+
+DISCOUNT_KIND_RATE = "rate"
+DISCOUNT_KIND_AMOUNT = "amount"
+DISCOUNT_KIND_OPTIONS = (DISCOUNT_KIND_RATE, DISCOUNT_KIND_AMOUNT)
+DISCOUNT_KIND_LABELS = {
+    DISCOUNT_KIND_RATE: "折扣",
+    DISCOUNT_KIND_AMOUNT: "立减",
+}
+
+
+@dataclass
+class LeaseDiscount:
+    start_date: date
+    end_date: date
+    kind: str  # "rate" | "amount"
+    value: float
+    id: int = 0
+
+    @staticmethod
+    def period_text(start: date, end: date) -> str:
+        """月周期展示到天：YYYY-MM-DD ~ YYYY-MM-DD。"""
+        # 不间断空格，避免起止区间中途折行
+        return f"{start.isoformat()}\u00a0~\u00a0{end.isoformat()}"
+
+    def value_text(self) -> str:
+        return f"{self.value:g}"
+
+    def label(self) -> str:
+        kind_label = DISCOUNT_KIND_LABELS.get(self.kind, self.kind)
+        return f"{self.period_text(self.start_date, self.end_date)} {kind_label} {self.value_text()}"
 
 
 PAYMENT_PERIOD_OPTIONS = ("季度", "半年", "年")
@@ -101,6 +134,7 @@ class Lease:
     status: str
     payment_period: str = DEFAULT_PAYMENT_PERIOD
     free_periods: list[FreePeriod] | None = None
+    discounts: list[LeaseDiscount] | None = None
     room_no: str = ""
     project_id: int = 0
     project_name: str = ""
@@ -109,6 +143,8 @@ class Lease:
     def __post_init__(self) -> None:
         if self.free_periods is None:
             self.free_periods = []
+        if self.discounts is None:
+            self.discounts = []
         self.payment_period = normalize_payment_period(self.payment_period)
 
     @property
@@ -130,6 +166,7 @@ class Lease:
                 row["payment_period"] if "payment_period" in keys else None
             ),
             free_periods=[],
+            discounts=[],
             room_no=row["room_no"] if "room_no" in keys else "",
             project_id=row["project_id"] if "project_id" in keys else 0,
             project_name=row["project_name"] if "project_name" in keys else "",
@@ -141,6 +178,34 @@ class Lease:
         if not periods:
             return ""
         return "\n".join(p.label() for p in periods)
+
+    def discounts_label(self) -> str:
+        """按租赁月添加的折/减：连续同规则合并，起止显示到天。"""
+        from datetime import timedelta
+
+        items = sorted(self.discounts or [], key=lambda d: d.start_date)
+        if not items:
+            return ""
+
+        groups: list[tuple[date, date, LeaseDiscount]] = []
+        for item in items:
+            if groups:
+                g_start, g_end, sample = groups[-1]
+                same_rule = item.kind == sample.kind and float(item.value) == float(
+                    sample.value
+                )
+                contiguous = item.start_date == g_end + timedelta(days=1)
+                if same_rule and contiguous:
+                    groups[-1] = (g_start, item.end_date, sample)
+                    continue
+            groups.append((item.start_date, item.end_date, item))
+
+        lines: list[str] = []
+        for start, end, sample in groups:
+            kind_label = DISCOUNT_KIND_LABELS.get(sample.kind, sample.kind)
+            period = LeaseDiscount.period_text(start, end)
+            lines.append(f"{period} {kind_label} {sample.value_text()}")
+        return "\n".join(lines)
 
 
 @dataclass
@@ -155,10 +220,14 @@ class Payment:
     room_no: str = ""
     project_name: str = ""
     project_id: int = 0
+    created_at: str = ""
+    updated_at: str = ""
 
     @classmethod
     def from_row(cls, row: Any) -> "Payment":
         keys = row.keys()
+        created_at = row["created_at"] if "created_at" in keys else ""
+        updated_at = row["updated_at"] if "updated_at" in keys else ""
         return cls(
             id=row["id"],
             lease_id=row["lease_id"],
@@ -170,6 +239,8 @@ class Payment:
             room_no=row["room_no"] if "room_no" in keys else "",
             project_name=row["project_name"] if "project_name" in keys else "",
             project_id=row["project_id"] if "project_id" in keys else 0,
+            created_at=created_at or "",
+            updated_at=updated_at or created_at or "",
         )
 
 
@@ -193,6 +264,10 @@ class ReminderItem:
     lease_id: int
     period_start: Optional[date]
     period_end: Optional[date]
-    amount: float
+    amount: float  # 剩余应缴；合同类为月租
     days_delta: int
     detail: str
+    due_amount: float = 0.0  # 应缴（折减前）
+    paid_amount: float = 0.0  # 已缴
+    discount_amount: float = 0.0  # 折/减
+    free_amount: float = 0.0  # 免租（按免租期起止计算）

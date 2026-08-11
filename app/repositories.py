@@ -4,7 +4,15 @@ from datetime import date
 from typing import Optional
 
 from app.database import Database
-from app.models import AppSettings, FreePeriod, Lease, Payment, Project, Room
+from app.models import (
+    AppSettings,
+    FreePeriod,
+    Lease,
+    LeaseDiscount,
+    Payment,
+    Project,
+    Room,
+)
 
 
 class SettingsRepository:
@@ -203,7 +211,7 @@ class LeaseRepository:
         with self.db.connect() as conn:
             rows = conn.execute(
                 f"""
-                SELECT id, lease_id, start_date, end_date
+                SELECT id, lease_id, start_date, end_date, amount
                 FROM lease_free_periods
                 WHERE lease_id IN ({placeholders})
                 ORDER BY start_date ASC, id ASC
@@ -212,11 +220,13 @@ class LeaseRepository:
             ).fetchall()
         result: dict[int, list[FreePeriod]] = {lid: [] for lid in lease_ids}
         for row in rows:
+            keys = row.keys()
             result[row["lease_id"]].append(
                 FreePeriod(
                     id=row["id"],
                     start_date=date.fromisoformat(row["start_date"]),
                     end_date=date.fromisoformat(row["end_date"]),
+                    amount=float(row["amount"]) if "amount" in keys else 0.0,
                 )
             )
         return result
@@ -226,6 +236,42 @@ class LeaseRepository:
         for lease in leases:
             lease.free_periods = mapping.get(lease.id, [])
         return leases
+
+    def _load_discounts(self, lease_ids: list[int]) -> dict[int, list[LeaseDiscount]]:
+        if not lease_ids:
+            return {}
+        placeholders = ",".join("?" for _ in lease_ids)
+        with self.db.connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT id, lease_id, start_date, end_date, kind, value
+                FROM lease_discounts
+                WHERE lease_id IN ({placeholders})
+                ORDER BY start_date ASC, id ASC
+                """,
+                lease_ids,
+            ).fetchall()
+        result: dict[int, list[LeaseDiscount]] = {lid: [] for lid in lease_ids}
+        for row in rows:
+            result[row["lease_id"]].append(
+                LeaseDiscount(
+                    id=row["id"],
+                    start_date=date.fromisoformat(row["start_date"]),
+                    end_date=date.fromisoformat(row["end_date"]),
+                    kind=row["kind"],
+                    value=float(row["value"]),
+                )
+            )
+        return result
+
+    def _attach_discounts(self, leases: list[Lease]) -> list[Lease]:
+        mapping = self._load_discounts([lease.id for lease in leases])
+        for lease in leases:
+            lease.discounts = mapping.get(lease.id, [])
+        return leases
+
+    def _attach_children(self, leases: list[Lease]) -> list[Lease]:
+        return self._attach_discounts(self._attach_free_periods(leases))
 
     def list_all(
         self,
@@ -251,7 +297,7 @@ class LeaseRepository:
         sql += " ORDER BY l.end_date ASC, l.id DESC"
         with self.db.connect() as conn:
             rows = conn.execute(sql, tuple(params)).fetchall()
-        return self._attach_free_periods([Lease.from_row(r) for r in rows])
+        return self._attach_children([Lease.from_row(r) for r in rows])
 
     def list_by_room(self, room_id: int) -> list[Lease]:
         with self.db.connect() as conn:
@@ -266,7 +312,7 @@ class LeaseRepository:
                 """,
                 (room_id,),
             ).fetchall()
-        return self._attach_free_periods([Lease.from_row(r) for r in rows])
+        return self._attach_children([Lease.from_row(r) for r in rows])
 
     def get(self, lease_id: int) -> Optional[Lease]:
         with self.db.connect() as conn:
@@ -282,7 +328,7 @@ class LeaseRepository:
             ).fetchone()
         if not row:
             return None
-        return self._attach_free_periods([Lease.from_row(row)])[0]
+        return self._attach_children([Lease.from_row(row)])[0]
 
     def find_overlap(
         self,
@@ -309,7 +355,7 @@ class LeaseRepository:
             row = conn.execute(sql, params).fetchone()
         if not row:
             return None
-        return self._attach_free_periods([Lease.from_row(row)])[0]
+        return self._attach_children([Lease.from_row(row)])[0]
 
     def replace_free_periods(
         self, lease_id: int, free_periods: list[tuple[date, date]]
@@ -321,10 +367,38 @@ class LeaseRepository:
             for start_date, end_date in free_periods:
                 conn.execute(
                     """
-                    INSERT INTO lease_free_periods (lease_id, start_date, end_date)
-                    VALUES (?, ?, ?)
+                    INSERT INTO lease_free_periods (
+                        lease_id, start_date, end_date, amount
+                    ) VALUES (?, ?, ?, 0)
                     """,
-                    (lease_id, start_date.isoformat(), end_date.isoformat()),
+                    (
+                        lease_id,
+                        start_date.isoformat(),
+                        end_date.isoformat(),
+                    ),
+                )
+
+    def replace_discounts(
+        self,
+        lease_id: int,
+        discounts: list[tuple[date, date, str, float]],
+    ) -> None:
+        with self.db.connect() as conn:
+            conn.execute("DELETE FROM lease_discounts WHERE lease_id = ?", (lease_id,))
+            for start_date, end_date, kind, value in discounts:
+                conn.execute(
+                    """
+                    INSERT INTO lease_discounts (
+                        lease_id, start_date, end_date, kind, value
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        lease_id,
+                        start_date.isoformat(),
+                        end_date.isoformat(),
+                        kind,
+                        value,
+                    ),
                 )
 
     def create(
@@ -336,6 +410,7 @@ class LeaseRepository:
         end_date: date,
         free_periods: list[tuple[date, date]],
         payment_period: str,
+        discounts: list[tuple[date, date, str, float]] | None = None,
     ) -> int:
         with self.db.connect() as conn:
             cur = conn.execute(
@@ -356,6 +431,7 @@ class LeaseRepository:
             )
             lease_id = int(cur.lastrowid)
         self.replace_free_periods(lease_id, free_periods)
+        self.replace_discounts(lease_id, discounts or [])
         return lease_id
 
     def update(
@@ -368,6 +444,7 @@ class LeaseRepository:
         free_periods: list[tuple[date, date]],
         status: str,
         payment_period: str,
+        discounts: list[tuple[date, date, str, float]] | None = None,
     ) -> None:
         with self.db.connect() as conn:
             conn.execute(
@@ -388,6 +465,7 @@ class LeaseRepository:
                 ),
             )
         self.replace_free_periods(lease_id, free_periods)
+        self.replace_discounts(lease_id, discounts or [])
 
     def delete(self, lease_id: int) -> None:
         with self.db.connect() as conn:
@@ -486,7 +564,8 @@ class PaymentRepository:
             conn.execute(
                 """
                 UPDATE payments
-                SET period_start = ?, period_end = ?, amount = ?, paid_at = ?, note = ?
+                SET period_start = ?, period_end = ?, amount = ?, paid_at = ?, note = ?,
+                    updated_at = datetime('now', 'localtime')
                 WHERE id = ?
                 """,
                 (

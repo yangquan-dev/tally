@@ -3,7 +3,7 @@ from __future__ import annotations
 import customtkinter as ctk
 
 from app.services import AppServices
-from app.ui.utils import format_money
+from app.ui.utils import format_date_range, format_money
 from app.ui.widgets import DataTable
 
 
@@ -82,22 +82,23 @@ class HomePage(ctk.CTkFrame):
             columns=[
                 ("days", "紧急度", 120),
                 ("kind", "类型", 110),
-                ("project", "项目", 140),
-                ("room", "房间", 90),
-                ("amount", "金额", 110),
-                ("period", "周期", 240),
+                ("project", "项目", 120),
+                ("room", "房间", 70),
+                ("amount", "剩余应缴", 160),
+                ("period", "周期", 190),
             ],
             column_anchors={
                 "days": "center",
                 "kind": "center",
                 "project": "w",
                 "room": "center",
-                "amount": "e",
+                "amount": "w",
                 "period": "center",
             },
             rowheight=34,
             style_prefix="TallyReminder",
             emphasis_columns=("days",),
+            fit_content_columns=("amount",),
         )
         self.table.grid(row=3, column=0, sticky="nsew")
         self._configure_day_tags()
@@ -142,7 +143,7 @@ class HomePage(ctk.CTkFrame):
         self._stat_labels["expire"].configure(text=str(expire))
         if items:
             self.summary.configure(
-                text="排序：逾期 → 应收 → 合同已到期 → 即将到期；合同类金额为月租，应收类为应收额"
+                text="排序：逾期 → 应收 → 合同已到期 → 即将到期；应收类展示剩余应缴明细，合同类为月租"
             )
         else:
             self.summary.configure(text="今日暂无提醒事项")
@@ -164,23 +165,33 @@ class HomePage(ctk.CTkFrame):
         for idx, item in enumerate(items):
             period = ""
             if item.period_start and item.period_end:
-                period = (
-                    f"{item.period_start.isoformat()} ~ {item.period_end.isoformat()}"
-                )
+                period = format_date_range(item.period_start, item.period_end)
             days_text, tag = _days_display(item.days_delta)
-            amount = format_money(item.amount)
-            if item.kind in {"合同即将到期", "合同已到期"}:
-                amount = f"月租 {amount}"
             rows.append(
                 (
                     days_text,
                     item.kind,
                     item.project_name,
                     item.room_no,
-                    amount,
+                    self._amount_display(item),
                     period,
                 )
             )
             iids.append(str(idx))
             tags.append(tag)
         self.table.set_rows(rows, iids, tags=tags)
+
+    @staticmethod
+    def _amount_display(item):
+        if item.kind in {"合同即将到期", "合同已到期"}:
+            return f"月租 {format_money(item.amount)}"
+        # 剩余应缴金额（含英文括号）整段标红，避免拆 Label 产生缝隙
+        return [
+            ("剩余应缴", None),
+            (f"({item.amount:g})", "#b91c1c"),
+            (
+                f"=应缴({item.due_amount:g})-已缴({item.paid_amount:g})-"
+                f"免租({item.free_amount:g})-折/减({item.discount_amount:g})",
+                None,
+            ),
+        ]

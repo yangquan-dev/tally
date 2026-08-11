@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from calendar import monthrange
+from dataclasses import replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
@@ -24,8 +25,12 @@ from app.license import (
 from app.models import (
     AppSettings,
     DEFAULT_PAYMENT_PERIOD,
+    DISCOUNT_KIND_AMOUNT,
+    DISCOUNT_KIND_OPTIONS,
+    DISCOUNT_KIND_RATE,
     FreePeriod,
     Lease,
+    LeaseDiscount,
     PAYMENT_PERIOD_OPTIONS,
     Payment,
     Project,
@@ -52,6 +57,55 @@ def _add_months(d: date, months: int) -> date:
     month = month % 12 + 1
     day = min(d.day, monthrange(year, month)[1])
     return date(year, month, day)
+
+
+def _iter_lease_billing_months(
+    lease_start: date, lease_end: date
+) -> list[tuple[date, date]]:
+    """按起租日对齐的租赁月周期切片（含首尾，末月裁切到到期日）。"""
+    if lease_end < lease_start:
+        return []
+    months: list[tuple[date, date]] = []
+    idx = 0
+    while idx <= 600:
+        slice_start = _add_months(lease_start, idx)
+        if slice_start > lease_end:
+            break
+        slice_end = min(
+            _add_months(lease_start, idx + 1) - timedelta(days=1),
+            lease_end,
+        )
+        months.append((slice_start, slice_end))
+        if slice_end >= lease_end:
+            break
+        idx += 1
+    return months
+
+
+def _billing_month_gross_rent(
+    monthly_rent: float,
+    lease_start: date,
+    slice_start: date,
+    slice_end: date,
+) -> float:
+    """租赁月周期应缴基数：完整月为月租，非完整月按天比例折算。"""
+    rent = float(monthly_rent)
+    if rent <= 0 or slice_end < slice_start:
+        return 0.0
+    idx = 0
+    while idx <= 600:
+        start = _add_months(lease_start, idx)
+        if start == slice_start:
+            full_end = _add_months(lease_start, idx + 1) - timedelta(days=1)
+            full_days = (full_end - slice_start).days + 1
+            charge_days = (slice_end - slice_start).days + 1
+            if full_days <= 0 or charge_days <= 0:
+                return 0.0
+            return round(rent * charge_days / full_days, 2)
+        if start > slice_start:
+            break
+        idx += 1
+    return round(rent, 2)
 
 
 def _overlaps(a_start: date, a_end: date, b_start: date, b_end: date) -> bool:
@@ -97,6 +151,19 @@ def _range_any_overlap(
     start: date, end: date, periods: list[tuple[date, date]]
 ) -> bool:
     return any(_overlaps(start, end, p_start, p_end) for p_start, p_end in periods)
+
+
+def _covered_days(start: date, end: date, periods: list[tuple[date, date]]) -> int:
+    """计算 [start, end] 内被 periods 覆盖的天数（periods 先合并）。"""
+    if end < start or not periods:
+        return 0
+    total = 0
+    for seg_start, seg_end in _merge_date_ranges(periods):
+        ov_start = max(start, seg_start)
+        ov_end = min(end, seg_end)
+        if ov_end >= ov_start:
+            total += (ov_end - ov_start).days + 1
+    return total
 
 
 class SettingsService:
@@ -374,7 +441,7 @@ class LeaseService:
             if isinstance(item, FreePeriod):
                 free_start, free_end = item.start_date, item.end_date
             else:
-                free_start, free_end = item
+                free_start, free_end = item[0], item[1]
             if free_end < free_start:
                 raise ValidationError(f"第 {idx} 段免租期止不能早于免租期起")
             if free_start < start_date or free_end > end_date:
@@ -389,6 +456,71 @@ class LeaseService:
                 raise ValidationError("免租期时段不能互相重叠")
         return ordered
 
+    def _normalize_discounts(
+        self,
+        discounts: list[tuple[date, date, str, float]] | list[LeaseDiscount],
+        start_date: date,
+        end_date: date,
+        monthly_rent: float,
+    ) -> list[tuple[date, date, str, float]]:
+        normalized: list[tuple[date, date, str, float]] = []
+        rent = float(monthly_rent)
+        lease_months = {
+            (s, e): _billing_month_gross_rent(rent, start_date, s, e)
+            for s, e in _iter_lease_billing_months(start_date, end_date)
+        }
+        for idx, item in enumerate(discounts, start=1):
+            if isinstance(item, LeaseDiscount):
+                d_start, d_end, kind, value = (
+                    item.start_date,
+                    item.end_date,
+                    item.kind,
+                    item.value,
+                )
+            else:
+                d_start, d_end, kind, value = item
+            kind = (kind or "").strip()
+            if kind not in DISCOUNT_KIND_OPTIONS:
+                raise ValidationError(f"第 {idx} 段折/减类型无效")
+            if d_end < d_start:
+                raise ValidationError(f"第 {idx} 段折/减结束日不能早于开始日")
+            if d_start < start_date or d_end > end_date:
+                raise ValidationError(f"第 {idx} 段折/减必须落在租赁期内")
+            try:
+                numeric = float(value)
+            except (TypeError, ValueError) as exc:
+                raise ValidationError(f"第 {idx} 段折/减数值无效") from exc
+            if kind == DISCOUNT_KIND_RATE:
+                if not (0 < numeric < 1):
+                    raise ValidationError(
+                        f"第 {idx} 段折扣须大于 0 且小于 1（如 0.85 表示实付 85%）"
+                    )
+            elif numeric <= 0:
+                raise ValidationError(f"第 {idx} 段立减金额须大于 0")
+            if (d_start, d_end) not in lease_months:
+                raise ValidationError(
+                    f"第 {idx} 段折/减须按租赁月周期设置"
+                    f"（例如起租 {start_date} 的首月为 "
+                    f"{start_date} ~ "
+                    f"{min(_add_months(start_date, 1) - timedelta(days=1), end_date)}）"
+                )
+            if kind == DISCOUNT_KIND_AMOUNT:
+                cap = lease_months[(d_start, d_end)]
+                if numeric > cap + 1e-9:
+                    raise ValidationError(
+                        f"第 {idx} 段立减金额不能超过该月周期应缴"
+                        f"（{d_start} ~ {d_end} 应缴 {cap:g}）"
+                    )
+            normalized.append((d_start, d_end, kind, numeric))
+
+        ordered = sorted(normalized, key=lambda item: item[0])
+        for i in range(1, len(ordered)):
+            prev_start, prev_end = ordered[i - 1][0], ordered[i - 1][1]
+            curr_start, curr_end = ordered[i][0], ordered[i][1]
+            if _overlaps(prev_start, prev_end, curr_start, curr_end):
+                raise ValidationError("折/减月份不能互相重叠")
+        return ordered
+
     def _validate(
         self,
         room_id: int,
@@ -398,8 +530,9 @@ class LeaseService:
         end_date: date,
         free_periods: list[tuple[date, date]] | list[FreePeriod],
         payment_period: str,
+        discounts: list[tuple[date, date, str, float]] | list[LeaseDiscount],
         exclude_id: Optional[int] = None,
-    ) -> tuple[list[tuple[date, date]], str]:
+    ) -> tuple[list[tuple[date, date]], str, list[tuple[date, date, str, float]]]:
         if deposit < 0 or monthly_rent < 0:
             raise ValidationError("押金和月租金不能为负数")
         if end_date < start_date:
@@ -410,12 +543,15 @@ class LeaseService:
         if period not in PAYMENT_PERIOD_OPTIONS:
             raise ValidationError("缴费周期无效")
         normalized = self._normalize_free_periods(free_periods, start_date, end_date)
+        normalized_discounts = self._normalize_discounts(
+            discounts, start_date, end_date, monthly_rent
+        )
         overlap = self.repo.find_overlap(room_id, start_date, end_date, exclude_id)
         if overlap:
             raise ValidationError(
                 f"与已有生效合同时间重叠（{overlap.start_date} ~ {overlap.end_date}）"
             )
-        return normalized, period
+        return normalized, period, normalized_discounts
 
     def create(
         self,
@@ -426,8 +562,10 @@ class LeaseService:
         end_date: date,
         free_periods: list[tuple[date, date]] | None = None,
         payment_period: str = DEFAULT_PAYMENT_PERIOD,
+        discounts: list[tuple[date, date, str, float]] | list[LeaseDiscount]
+        | None = None,
     ) -> int:
-        normalized, period = self._validate(
+        normalized, period, normalized_discounts = self._validate(
             room_id,
             deposit,
             monthly_rent,
@@ -435,6 +573,7 @@ class LeaseService:
             end_date,
             free_periods or [],
             payment_period,
+            discounts or [],
         )
         lease_id = self.repo.create(
             room_id,
@@ -444,6 +583,7 @@ class LeaseService:
             end_date,
             normalized,
             period,
+            normalized_discounts,
         )
         self.room_service.refresh_status(room_id)
         return lease_id
@@ -458,6 +598,8 @@ class LeaseService:
         free_periods: list[tuple[date, date]] | list[FreePeriod] | None,
         status: str,
         payment_period: str = DEFAULT_PAYMENT_PERIOD,
+        discounts: list[tuple[date, date, str, float]] | list[LeaseDiscount]
+        | None = None,
     ) -> None:
         lease = self.repo.get(lease_id)
         if not lease:
@@ -465,8 +607,11 @@ class LeaseService:
         if status not in {"生效", "结束"}:
             raise ValidationError("租赁状态无效")
         periods = free_periods if free_periods is not None else (lease.free_periods or [])
+        discount_items = (
+            discounts if discounts is not None else (lease.discounts or [])
+        )
         if status == "生效":
-            normalized, period = self._validate(
+            normalized, period, normalized_discounts = self._validate(
                 lease.room_id,
                 deposit,
                 monthly_rent,
@@ -474,6 +619,7 @@ class LeaseService:
                 end_date,
                 periods,
                 payment_period,
+                discount_items,
                 exclude_id=lease_id,
             )
         else:
@@ -485,6 +631,9 @@ class LeaseService:
             if period not in PAYMENT_PERIOD_OPTIONS:
                 raise ValidationError("缴费周期无效")
             normalized = self._normalize_free_periods(periods, start_date, end_date)
+            normalized_discounts = self._normalize_discounts(
+                discount_items, start_date, end_date, monthly_rent
+            )
         self.repo.update(
             lease_id,
             deposit,
@@ -494,6 +643,7 @@ class LeaseService:
             normalized,
             status,
             period,
+            normalized_discounts,
         )
         self.room_service.refresh_status(lease.room_id)
 
@@ -507,6 +657,7 @@ class LeaseService:
 
 class PaymentService:
     def __init__(self, db: Database) -> None:
+        self.db = db
         self.repo = PaymentRepository(db)
         self.lease_repo = LeaseRepository(db)
 
@@ -525,6 +676,8 @@ class PaymentService:
         period_start: date,
         period_end: date,
         amount: float,
+        *,
+        exclude_payment_id: Optional[int] = None,
     ) -> None:
         if amount <= 0:
             raise ValidationError("缴费金额必须大于 0")
@@ -535,6 +688,58 @@ class PaymentService:
             raise ValidationError("租赁不存在")
         if period_start < lease.start_date or period_end > lease.end_date:
             raise ValidationError("缴费周期必须落在租赁期内")
+        self._validate_period_cap(
+            lease,
+            period_start,
+            period_end,
+            amount,
+            exclude_payment_id=exclude_payment_id,
+        )
+
+    def _validate_period_cap(
+        self,
+        lease: Lease,
+        period_start: date,
+        period_end: date,
+        amount: float,
+        *,
+        exclude_payment_id: Optional[int] = None,
+    ) -> None:
+        """同一应收期内可多次缴费，累计分摊金额不得超过该期应缴。"""
+        reminder_svc = ReminderService(self.db)
+        candidate = Payment(
+            id=0,
+            lease_id=lease.id,
+            period_start=period_start,
+            period_end=period_end,
+            amount=amount,
+            paid_at=period_start,
+            note="",
+        )
+        existing = [
+            pay
+            for pay in self.repo.list_by_lease(lease.id)
+            if exclude_payment_id is None or pay.id != exclude_payment_id
+        ]
+        for period in reminder_svc.generate_rent_periods(lease):
+            if period.amount <= 0:
+                continue
+            new_credit = ReminderService._payment_credit_for_period(candidate, period)
+            if new_credit <= 0:
+                continue
+            old_credit = sum(
+                ReminderService._payment_credit_for_period(pay, period)
+                for pay in existing
+            )
+            due = round(float(period.amount), 2)
+            total = round(old_credit + new_credit, 2)
+            if total > due + 0.009:
+                remaining = round(max(0.0, due - old_credit), 2)
+                raise ValidationError(
+                    f"应收期 {period.period_start} ~ {period.period_end} "
+                    f"应缴 ¥{due:.2f}，已缴 ¥{old_credit:.2f}，"
+                    f"本次最多可缴 ¥{remaining:.2f}"
+                )
 
     def create(
         self,
@@ -562,7 +767,13 @@ class PaymentService:
         payment = self.repo.get(payment_id)
         if not payment:
             raise ValidationError("缴费记录不存在")
-        self._validate(payment.lease_id, period_start, period_end, amount)
+        self._validate(
+            payment.lease_id,
+            period_start,
+            period_end,
+            amount,
+            exclude_payment_id=payment_id,
+        )
         self.repo.update(
             payment_id, period_start, period_end, amount, paid_at, note.strip()
         )
@@ -615,43 +826,236 @@ class ReminderService:
         period_start: date,
         period_end: date,
         free_ranges: list[tuple[date, date]],
+        *,
+        apply_discounts: bool = True,
     ) -> float:
-        """按月切片累计应收：整月免租不计，其余按月租金计。"""
-        if _range_fully_covered(period_start, period_end, free_ranges):
-            return 0.0
-        total = 0.0
+        """按月切片累计应收（非完整月按天比例）。"""
+        _free, _disc, net = self._period_charge_totals(
+            lease,
+            period_start,
+            period_end,
+            free_ranges,
+            apply_discounts=apply_discounts,
+        )
+        return net
+
+    def period_gross_amount(self, lease: Lease, period: RentPeriod) -> float:
+        """应收期应缴（未含免租与折/减；非完整月按天比例）。"""
+        return self._period_amount(
+            lease,
+            period.period_start,
+            period.period_end,
+            [],
+            apply_discounts=False,
+        )
+
+    def period_free_amount(self, lease: Lease, period: RentPeriod) -> float:
+        """免租费用：整段免租按应缴基数；部分免租按折后金额×免租天数比例。"""
+        free_ranges = [(p.start_date, p.end_date) for p in (lease.free_periods or [])]
+        free_amt, _disc, _net = self._period_charge_totals(
+            lease,
+            period.period_start,
+            period.period_end,
+            free_ranges,
+            apply_discounts=True,
+        )
+        return free_amt
+
+    def period_discount_amount(self, lease: Lease, period: RentPeriod) -> float:
+        """折/减合计：按当月应缴基数计算；整段免租的月份不计折/减。"""
+        free_ranges = [(p.start_date, p.end_date) for p in (lease.free_periods or [])]
+        _free, disc_amt, _net = self._period_charge_totals(
+            lease,
+            period.period_start,
+            period.period_end,
+            free_ranges,
+            apply_discounts=True,
+        )
+        return disc_amt
+
+    def _period_charge_totals(
+        self,
+        lease: Lease,
+        period_start: date,
+        period_end: date,
+        free_ranges: list[tuple[date, date]],
+        *,
+        apply_discounts: bool,
+    ) -> tuple[float, float, float]:
+        """累计某应收期内的（免租, 折/减, 净应收）。"""
+        if period_end < period_start:
+            return 0.0, 0.0, 0.0
+        if free_ranges and _range_fully_covered(period_start, period_end, free_ranges):
+            _f, _d, gross = self._period_charge_totals(
+                lease,
+                period_start,
+                period_end,
+                [],
+                apply_discounts=False,
+            )
+            return round(gross, 2), 0.0, 0.0
+
+        discounts = list(lease.discounts or []) if apply_discounts else []
+        free_total = 0.0
+        disc_total = 0.0
+        net_total = 0.0
         month_idx = 0
         while True:
             slice_start = _add_months(lease.start_date, month_idx)
             if slice_start > period_end:
                 break
-            slice_end = min(
-                _add_months(lease.start_date, month_idx + 1) - timedelta(days=1),
-                lease.end_date,
-            )
+            full_end = _add_months(lease.start_date, month_idx + 1) - timedelta(days=1)
+            lease_slice_end = min(full_end, lease.end_date)
             overlap_start = max(slice_start, period_start)
-            overlap_end = min(slice_end, period_end)
+            overlap_end = min(lease_slice_end, period_end)
             if overlap_end >= overlap_start:
-                if not _range_fully_covered(overlap_start, overlap_end, free_ranges):
-                    total += float(lease.monthly_rent)
+                full_days = (full_end - slice_start).days + 1
+                free_amt, disc_amt, net = self._month_charge_components(
+                    lease.monthly_rent,
+                    overlap_start,
+                    overlap_end,
+                    slice_start,
+                    full_days,
+                    free_ranges,
+                    discounts,
+                )
+                free_total += free_amt
+                disc_total += disc_amt
+                net_total += net
             month_idx += 1
             if month_idx > 600:
                 break
+        return (
+            round(max(0.0, free_total), 2),
+            round(max(0.0, disc_total), 2),
+            round(max(0.0, net_total), 2),
+        )
+
+    @classmethod
+    def _month_charge_components(
+        cls,
+        monthly_rent: float,
+        charge_start: date,
+        charge_end: date,
+        full_month_start: date,
+        full_month_days: int,
+        free_ranges: list[tuple[date, date]],
+        discounts: list[LeaseDiscount],
+    ) -> tuple[float, float, float]:
+        """单月计费（免租额, 折/减额, 净应收）。
+
+        非完整月：应缴基数 = 月租 × 计费天数 ÷ 完整租赁月天数。
+        - 计费区间全免租：免租=应缴基数，折/减=0，净=0
+        - 否则先按应缴基数套折/减，再对折后金额按免租天数比例计免租与净应收
+        """
+        charge_days = (charge_end - charge_start).days + 1
+        if charge_days <= 0 or full_month_days <= 0 or monthly_rent <= 0:
+            return 0.0, 0.0, 0.0
+        rent = round(float(monthly_rent) * charge_days / full_month_days, 2)
+        if rent <= 0:
+            return 0.0, 0.0, 0.0
+
+        free_days = min(
+            charge_days, _covered_days(charge_start, charge_end, free_ranges)
+        )
+        if free_days >= charge_days:
+            return rent, 0.0, 0.0
+
+        match_end = full_month_start + timedelta(days=full_month_days - 1)
+        after_disc = cls._apply_month_discount(
+            rent, full_month_start, match_end, discounts
+        )
+        disc_amt = round(max(0.0, rent - after_disc), 2)
+        payable_ratio = (charge_days - free_days) / charge_days
+        free_amt = round(after_disc * (1.0 - payable_ratio), 2)
+        net = round(after_disc * payable_ratio, 2)
+        drift = round(rent - free_amt - disc_amt - net, 2)
+        if drift:
+            net = round(net + drift, 2)
+        return free_amt, disc_amt, net
+
+    @staticmethod
+    def _apply_month_discount(
+        monthly_rent: float,
+        slice_start: date,
+        slice_end: date,
+        discounts: list[LeaseDiscount],
+    ) -> float:
+        """对应缴基数套用折/减，返回折后金额（立减封顶为基数）。"""
+        base = float(monthly_rent)
+        for item in discounts:
+            if not _overlaps(slice_start, slice_end, item.start_date, item.end_date):
+                continue
+            if item.kind == DISCOUNT_KIND_RATE:
+                return round(base * float(item.value), 2)
+            if item.kind == DISCOUNT_KIND_AMOUNT:
+                return round(max(0.0, base - float(item.value)), 2)
+            break
+        return round(base, 2)
+
+    @staticmethod
+    def _month_amount_with_discount(
+        base_amount: float,
+        slice_start: date,
+        slice_end: date,
+        discounts: list[LeaseDiscount],
+    ) -> float:
+        """兼容旧调用：对给定基数套用折/减。"""
+        base = float(base_amount)
+        for item in discounts:
+            if not _overlaps(slice_start, slice_end, item.start_date, item.end_date):
+                continue
+            if item.kind == DISCOUNT_KIND_RATE:
+                return round(base * float(item.value), 2)
+            if item.kind == DISCOUNT_KIND_AMOUNT:
+                return round(max(0.0, base - float(item.value)), 2)
+            break
+        return round(base, 2)
+
+    @staticmethod
+    def _payment_credit_for_period(payment: Payment, period: RentPeriod) -> float:
+        """将一笔缴费按日期重叠比例分摊到应收期。"""
+        if payment.period_end < period.period_start or payment.period_start > period.period_end:
+            return 0.0
+        pay_days = (payment.period_end - payment.period_start).days + 1
+        if pay_days <= 0:
+            return 0.0
+        overlap_start = max(payment.period_start, period.period_start)
+        overlap_end = min(payment.period_end, period.period_end)
+        overlap_days = (overlap_end - overlap_start).days + 1
+        if overlap_days <= 0:
+            return 0.0
+        return float(payment.amount) * overlap_days / pay_days
+
+    def paid_amount_for_period(
+        self,
+        lease_id: int,
+        period: RentPeriod,
+        *,
+        exclude_payment_id: Optional[int] = None,
+    ) -> float:
+        payments = self.payment_repo.list_by_lease(lease_id)
+        total = sum(
+            self._payment_credit_for_period(pay, period)
+            for pay in payments
+            if exclude_payment_id is None or pay.id != exclude_payment_id
+        )
         return round(total, 2)
 
+    def remaining_amount_for_period(
+        self,
+        lease_id: int,
+        period: RentPeriod,
+        *,
+        exclude_payment_id: Optional[int] = None,
+    ) -> float:
+        remaining = float(period.amount) - self.paid_amount_for_period(
+            lease_id, period, exclude_payment_id=exclude_payment_id
+        )
+        return round(max(0.0, remaining), 2)
+
     def is_period_paid(self, lease_id: int, period: RentPeriod) -> bool:
-        payments = self.payment_repo.list_by_lease(lease_id)
-        for pay in payments:
-            if (
-                pay.period_start == period.period_start
-                and pay.period_end == period.period_end
-            ):
-                return True
-            if _fully_covers(
-                pay.period_start, pay.period_end, period.period_start, period.period_end
-            ):
-                return True
-        return False
+        return self.remaining_amount_for_period(lease_id, period) <= 0.0
 
     def unpaid_periods(self, lease: Lease, today: Optional[date] = None) -> list[RentPeriod]:
         today = today or date.today()
@@ -662,7 +1066,12 @@ class ReminderService:
             # 只关心已进入提醒窗口或已开始的周期（避免列出遥远未来）
             if period.period_start > today + timedelta(days=366):
                 continue
-            if not self.is_period_paid(lease.id, period):
+            remaining = self.remaining_amount_for_period(lease.id, period)
+            if remaining <= 0:
+                continue
+            if remaining < float(period.amount):
+                result.append(replace(period, amount=remaining))
+            else:
                 result.append(period)
         return result
 
@@ -718,17 +1127,26 @@ class ReminderService:
                 if today < remind_from:
                     continue
                 days_delta = (period.period_start - today).days
+                due = self.period_gross_amount(lease, period)
+                free = self.period_free_amount(lease, period)
+                discount = self.period_discount_amount(lease, period)
+                paid = self.paid_amount_for_period(lease.id, period)
+                remaining = round(max(0.0, due - paid - free - discount), 2)
+                partial_note = (
+                    "（已部分缴费）" if paid > 0.009 and remaining > 0 else ""
+                )
                 if days_delta < 0:
                     kind = "已逾期"
                     detail = (
                         f"应收期 {period.period_start} ~ {period.period_end} "
-                        f"已逾期 {abs(days_delta)} 天"
+                        f"已逾期 {abs(days_delta)} 天{partial_note}"
                     )
                 else:
                     kind = "应收提醒"
                     detail = (
                         f"应收期 {period.period_start} ~ {period.period_end}"
                         + ("（含免租区间）" if period.partial_free else "")
+                        + partial_note
                     )
                 reminders.append(
                     ReminderItem(
@@ -740,9 +1158,13 @@ class ReminderService:
                         lease_id=lease.id,
                         period_start=period.period_start,
                         period_end=period.period_end,
-                        amount=period.amount,
+                        amount=remaining,
                         days_delta=days_delta,
                         detail=detail,
+                        due_amount=due,
+                        paid_amount=paid,
+                        discount_amount=discount,
+                        free_amount=free,
                     )
                 )
 

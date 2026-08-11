@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS payments (
     paid_at TEXT NOT NULL DEFAULT (date('now', 'localtime')),
     note TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
     FOREIGN KEY(lease_id) REFERENCES leases(id) ON DELETE CASCADE
 );
 
@@ -57,6 +58,17 @@ CREATE TABLE IF NOT EXISTS lease_free_periods (
     lease_id INTEGER NOT NULL,
     start_date TEXT NOT NULL,
     end_date TEXT NOT NULL,
+    amount REAL NOT NULL DEFAULT 0,
+    FOREIGN KEY(lease_id) REFERENCES leases(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS lease_discounts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    lease_id INTEGER NOT NULL,
+    start_date TEXT NOT NULL,
+    end_date TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    value REAL NOT NULL,
     FOREIGN KEY(lease_id) REFERENCES leases(id) ON DELETE CASCADE
 );
 
@@ -70,6 +82,7 @@ CREATE INDEX IF NOT EXISTS idx_leases_room ON leases(room_id);
 CREATE INDEX IF NOT EXISTS idx_leases_status ON leases(status);
 CREATE INDEX IF NOT EXISTS idx_payments_lease ON payments(lease_id);
 CREATE INDEX IF NOT EXISTS idx_free_periods_lease ON lease_free_periods(lease_id);
+CREATE INDEX IF NOT EXISTS idx_discounts_lease ON lease_discounts(lease_id);
 """
 
 DEFAULT_SETTINGS = {
@@ -97,6 +110,8 @@ class Database:
             self._migrate_free_periods(conn)
             self._migrate_drop_project_address(conn)
             self._migrate_lease_payment_period(conn)
+            self._migrate_payment_timestamps(conn)
+            self._migrate_free_period_amount(conn)
 
     def _migrate_lease_payment_period(self, conn: sqlite3.Connection) -> None:
         """为已有租赁补充缴费周期（默认季度）。"""
@@ -105,6 +120,50 @@ class Database:
             return
         conn.execute(
             "ALTER TABLE leases ADD COLUMN payment_period TEXT NOT NULL DEFAULT '季度'"
+        )
+
+    def _migrate_payment_timestamps(self, conn: sqlite3.Connection) -> None:
+        """为已有缴费补充创建/更新时间。"""
+        cols = {
+            row[1] for row in conn.execute("PRAGMA table_info(payments)").fetchall()
+        }
+        # ALTER TABLE 不能使用非常量默认值，先加空串再回填。
+        if "created_at" not in cols:
+            conn.execute(
+                "ALTER TABLE payments ADD COLUMN created_at TEXT NOT NULL DEFAULT ''"
+            )
+            conn.execute(
+                """
+                UPDATE payments
+                SET created_at = datetime('now', 'localtime')
+                WHERE TRIM(created_at) = ''
+                """
+            )
+        if "updated_at" not in cols:
+            conn.execute(
+                "ALTER TABLE payments ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''"
+            )
+            conn.execute(
+                """
+                UPDATE payments
+                SET updated_at = COALESCE(
+                    NULLIF(TRIM(created_at), ''),
+                    datetime('now', 'localtime')
+                )
+                WHERE TRIM(updated_at) = ''
+                """
+            )
+
+    def _migrate_free_period_amount(self, conn: sqlite3.Connection) -> None:
+        """为免租期补充免租金额列。"""
+        cols = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(lease_free_periods)").fetchall()
+        }
+        if "amount" in cols:
+            return
+        conn.execute(
+            "ALTER TABLE lease_free_periods ADD COLUMN amount REAL NOT NULL DEFAULT 0"
         )
 
     def _migrate_drop_project_address(self, conn: sqlite3.Connection) -> None:

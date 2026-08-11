@@ -157,10 +157,16 @@ def format_reminders_markdown(
                 period = (
                     f"{item.period_start.isoformat()} ~ {item.period_end.isoformat()}"
                 )
-            amount_label = "月租" if kind in {"合同即将到期", "合同已到期"} else "应收"
             lines.append(f"**{item.project_name} · {item.room_no}**")
             lines.append(f"- {_days_text(item.days_delta)}")
-            lines.append(f"- {amount_label} {_money_text(item.amount)}")
+            if kind in {"合同即将到期", "合同已到期"}:
+                lines.append(f"- 月租 {_money_text(item.amount)}")
+            else:
+                lines.append(
+                    f"- 剩余应缴({item.amount:g})=应缴({item.due_amount:g})-"
+                    f"已缴({item.paid_amount:g})-免租({item.free_amount:g})-"
+                    f"折/减({item.discount_amount:g})"
+                )
             if period:
                 lines.append(f"- 周期 {period}")
             lines.append("")

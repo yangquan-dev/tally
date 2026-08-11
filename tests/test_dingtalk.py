@@ -117,6 +117,10 @@ class DingTalkHelpersTests(unittest.TestCase):
                 amount=3000,
                 days_delta=-2,
                 detail="",
+                due_amount=6000,
+                paid_amount=2000,
+                discount_amount=500,
+                free_amount=500,
             ),
             ReminderItem(
                 kind="应收提醒",
@@ -130,6 +134,10 @@ class DingTalkHelpersTests(unittest.TestCase):
                 amount=2800,
                 days_delta=3,
                 detail="",
+                due_amount=2800,
+                paid_amount=0,
+                discount_amount=0,
+                free_amount=0,
             ),
         ]
         title, text = format_reminders_markdown(
@@ -140,7 +148,10 @@ class DingTalkHelpersTests(unittest.TestCase):
         self.assertIn("已逾期", text)
         self.assertIn("一号院 · 101", text)
         self.assertIn("逾期 2 天", text)
-        self.assertIn("¥3,000.00", text)
+        self.assertIn(
+            "剩余应缴(3000)=应缴(6000)-已缴(2000)-免租(500)-折/减(500)",
+            text,
+        )
         self.assertIn("应收提醒", text)
 
     def test_format_empty(self) -> None:

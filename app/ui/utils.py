@@ -30,6 +30,13 @@ def center_window(
         pass
 
 
+def format_date_range(start: date | str, end: date | str) -> str:
+    """格式化起止日期区间；使用不间断空格避免中途折行。"""
+    start_text = start.isoformat() if isinstance(start, date) else str(start)
+    end_text = end.isoformat() if isinstance(end, date) else str(end)
+    return f"{start_text}\u00a0~\u00a0{end_text}"
+
+
 def parse_date(text: str, field_name: str = "日期") -> date:
     text = text.strip()
     if not text:
@@ -171,6 +178,54 @@ def period_end_by_months(start: date, months: int, hard_end: date | None = None)
     if hard_end is not None and end > hard_end:
         return hard_end
     return end
+
+
+def iter_lease_billing_months(
+    lease_start: date, lease_end: date
+) -> list[tuple[date, date]]:
+    """按起租日对齐的租赁月周期切片（含首尾，末月裁切到到期日）。"""
+    if lease_end < lease_start:
+        return []
+    months: list[tuple[date, date]] = []
+    idx = 0
+    while idx <= 600:
+        slice_start = add_months(lease_start, idx)
+        if slice_start > lease_end:
+            break
+        slice_end = period_end_by_months(lease_start, idx + 1, hard_end=lease_end)
+        months.append((slice_start, slice_end))
+        if slice_end >= lease_end:
+            break
+        idx += 1
+    return months
+
+
+def billing_month_gross_rent(
+    monthly_rent: float,
+    lease_start: date,
+    slice_start: date,
+    slice_end: date,
+) -> float:
+    """租赁月周期应缴基数：完整月为月租，非完整月按天比例折算。"""
+    rent = float(monthly_rent)
+    if rent <= 0 or slice_end < slice_start:
+        return 0.0
+    idx = 0
+    while idx <= 600:
+        start = add_months(lease_start, idx)
+        if start == slice_start:
+            full_end = add_months(lease_start, idx + 1) - timedelta(days=1)
+            full_days = (full_end - slice_start).days + 1
+            charge_days = (slice_end - slice_start).days + 1
+            if full_days <= 0 or charge_days <= 0:
+                return 0.0
+            return round(rent * charge_days / full_days, 2)
+        if start > slice_start:
+            break
+        idx += 1
+    # 无法对齐时退回按区间天数相对 30 天估算，正常路径不会走到
+    charge_days = (slice_end - slice_start).days + 1
+    return round(rent * charge_days / max(charge_days, 1), 2)
 
 
 def billing_month_count(start: date, end: date) -> float:

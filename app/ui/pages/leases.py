@@ -12,13 +12,20 @@ from app.models import (
 from app.services import AppServices, ValidationError
 from app.ui.utils import (
     ask_yes_no,
+    format_date_range,
     format_money,
     parse_date,
     parse_float,
     show_error,
     show_info,
 )
-from app.ui.widgets import DataTable, DatePickerField, FormDialog, FreePeriodsEditor
+from app.ui.widgets import (
+    DataTable,
+    DatePickerField,
+    DiscountPeriodsEditor,
+    FormDialog,
+    FreePeriodsEditor,
+)
 
 
 class LeaseFormDialog(FormDialog):
@@ -31,7 +38,7 @@ class LeaseFormDialog(FormDialog):
         lock_room: bool = False,
         allow_status: bool = False,
     ) -> None:
-        super().__init__(master, title, width=680, height=760)
+        super().__init__(master, title, width=760, height=720, scrollable=True)
         initial = initial or {}
         self.rooms = rooms
         self.lock_room = lock_room
@@ -98,7 +105,17 @@ class LeaseFormDialog(FormDialog):
         self.free_editor = FreePeriodsEditor(self.body, initial=free_initial)
         self.free_editor.grid(row=7, column=0, columnspan=2, sticky="ew", pady=8)
 
-        next_row = 8
+        discount_initial = initial.get("discounts") or []
+        self.discount_editor = DiscountPeriodsEditor(
+            self.body,
+            initial=discount_initial,
+            lease_start_var=self.start_var,
+            lease_end_var=self.end_var,
+            monthly_rent_var=self.rent_var,
+        )
+        self.discount_editor.grid(row=8, column=0, columnspan=2, sticky="ew", pady=8)
+
+        next_row = 9
         if allow_status:
             self.add_field(
                 next_row,
@@ -141,6 +158,7 @@ class LeaseFormDialog(FormDialog):
             "start_date": parse_date(self.start_var.get(), "起租时间"),
             "end_date": parse_date(self.end_var.get(), "到期时间"),
             "free_periods": self.free_editor.get_periods(),
+            "discounts": self.discount_editor.get_discounts(),
             "status": self.status_var.get(),
         }
 
@@ -169,10 +187,22 @@ class LeasesPage(ctk.CTkFrame):
             filter_box,
             values=["全部项目"],
             variable=self.project_var,
-            command=lambda _v: self.refresh(),
-            width=180,
+            command=self._on_project_filter_changed,
+            width=140,
         )
         self.project_menu.pack(side="left")
+        ctk.CTkLabel(filter_box, text="房间号", text_color="#6b7280").pack(
+            side="left", padx=(12, 8)
+        )
+        self.room_var = ctk.StringVar(value="全部房间")
+        self.room_menu = ctk.CTkOptionMenu(
+            filter_box,
+            values=["全部房间"],
+            variable=self.room_var,
+            command=lambda _v: self.refresh(),
+            width=110,
+        )
+        self.room_menu.pack(side="left")
         ctk.CTkLabel(filter_box, text="状态", text_color="#6b7280").pack(
             side="left", padx=(12, 8)
         )
@@ -182,7 +212,7 @@ class LeasesPage(ctk.CTkFrame):
             values=["全部", "生效", "结束"],
             variable=self.status_var,
             command=lambda _v: self.refresh(),
-            width=100,
+            width=90,
         ).pack(side="left")
 
         actions = ctk.CTkFrame(header, fg_color="transparent")
@@ -204,13 +234,14 @@ class LeasesPage(ctk.CTkFrame):
             self,
             columns=[
                 ("id", "ID", 48),
-                ("project", "项目", 120),
+                ("project", "项目", 110),
                 ("room", "房间", 70),
-                ("deposit", "押金", 80),
-                ("rent", "月租金", 80),
+                ("deposit", "押金", 70),
+                ("rent", "月租金", 70),
                 ("period", "缴费周期", 72),
-                ("term", "租期（起租~到期）", 210),
-                ("free", "免租期", 210),
+                ("term", "租期", 150),
+                ("free", "免租期", 150),
+                ("discount", "折/减（月周期）", 220),
                 ("status", "状态", 60),
             ],
             column_anchors={
@@ -221,11 +252,14 @@ class LeasesPage(ctk.CTkFrame):
                 "rent": "e",
                 "period": "center",
                 "term": "center",
-                "free": "w",
+                "free": "center",
+                "discount": "w",
                 "status": "center",
             },
             style_prefix="TallyLease",
             rowheight=34,
+            cell_pady=0,
+            fit_content_columns=("term", "free"),
         )
         self.table.grid(row=1, column=0, sticky="nsew")
 
@@ -247,6 +281,28 @@ class LeasesPage(ctk.CTkFrame):
             self.project_var.set(current)
         else:
             self.project_var.set("全部项目")
+        self._reload_room_filters(preserve_selection=True)
+
+    def _reload_room_filters(self, preserve_selection: bool = True) -> None:
+        if self.services.rooms is None:
+            return
+        project_id = self._current_project_id()
+        if project_id is None:
+            values = ["全部房间"]
+        else:
+            rooms = self.services.rooms.list_by_project(project_id)
+            room_nos = sorted({r.room_no for r in rooms}, key=lambda x: (len(x), x))
+            values = ["全部房间"] + room_nos
+        current = self.room_var.get() if preserve_selection else "全部房间"
+        self.room_menu.configure(values=values)
+        if current in values:
+            self.room_var.set(current)
+        else:
+            self.room_var.set("全部房间")
+
+    def _on_project_filter_changed(self, _value: str) -> None:
+        self._reload_room_filters(preserve_selection=False)
+        self.refresh()
 
     def _current_project_id(self) -> int | None:
         if self.services.projects is None:
@@ -259,6 +315,12 @@ class LeasesPage(ctk.CTkFrame):
                 return p.id
         return None
 
+    def _current_room_no(self) -> str | None:
+        room_no = self.room_var.get().strip()
+        if not room_no or room_no == "全部房间":
+            return None
+        return room_no
+
     def refresh(self) -> None:
         if not self.services.is_ready or self.services.leases is None:
             return
@@ -268,6 +330,9 @@ class LeasesPage(ctk.CTkFrame):
             None if status == "全部" else status,
             self._current_project_id(),
         )
+        room_no = self._current_room_no()
+        if room_no is not None:
+            leases = [lease for lease in leases if lease.room_no == room_no]
         rows = []
         for lease in leases:
             rows.append(
@@ -278,8 +343,9 @@ class LeasesPage(ctk.CTkFrame):
                     format_money(lease.deposit),
                     format_money(lease.monthly_rent),
                     lease.payment_period,
-                    f"{lease.start_date.isoformat()} ~ {lease.end_date.isoformat()}",
+                    format_date_range(lease.start_date, lease.end_date),
                     lease.free_periods_label(),
+                    lease.discounts_label(),
                     lease.status,
                 )
             )
@@ -302,6 +368,7 @@ class LeasesPage(ctk.CTkFrame):
                 end_date=data["end_date"],
                 free_periods=data["free_periods"],
                 payment_period=data["payment_period"],
+                discounts=data["discounts"],
             )
             self.refresh()
         except (ValidationError, ValueError) as exc:
@@ -321,6 +388,15 @@ class LeasesPage(ctk.CTkFrame):
             (p.start_date.isoformat(), p.end_date.isoformat())
             for p in (lease.free_periods or [])
         ]
+        discounts = [
+            (
+                d.start_date.isoformat(),
+                d.end_date.isoformat(),
+                d.kind,
+                f"{d.value:g}",
+            )
+            for d in (lease.discounts or [])
+        ]
         data = LeaseFormDialog(
             self,
             "编辑租赁",
@@ -334,6 +410,7 @@ class LeasesPage(ctk.CTkFrame):
                 "start_date": lease.start_date.isoformat(),
                 "end_date": lease.end_date.isoformat(),
                 "free_periods": free_periods,
+                "discounts": discounts,
                 "status": lease.status,
             },
             lock_room=True,
@@ -351,6 +428,7 @@ class LeasesPage(ctk.CTkFrame):
                 free_periods=data["free_periods"],
                 status=data["status"],
                 payment_period=data["payment_period"],
+                discounts=data["discounts"],
             )
             self.refresh()
         except (ValidationError, ValueError) as exc:
@@ -381,6 +459,10 @@ class LeasesPage(ctk.CTkFrame):
                 ],
                 status="结束",
                 payment_period=lease.payment_period,
+                discounts=[
+                    (d.start_date, d.end_date, d.kind, d.value)
+                    for d in (lease.discounts or [])
+                ],
             )
             self.refresh()
         except ValidationError as exc:
