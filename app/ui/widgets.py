@@ -896,6 +896,7 @@ class DataTable(ctk.CTkFrame):
         self._declared_widths = [max(40, int(width)) for _, _, width in self._columns]
         self._col_minsizes = list(self._declared_widths)
         self._table_content_width = sum(self._col_minsizes)
+        self._scroll_gutter = self.SCROLL_GUTTER
         self._cell_font = tkfont.Font(font=self.CELL_FONT)
         self._header_font = tkfont.Font(font=self.HEADER_FONT)
 
@@ -927,12 +928,13 @@ class DataTable(ctk.CTkFrame):
         self.header_gutter = tk.Frame(
             table_wrap,
             bg=self.HEADER_BG,
-            width=self.SCROLL_GUTTER,
+            width=self._scroll_gutter,
             bd=0,
             highlightthickness=0,
         )
         self.header_gutter.grid(row=0, column=1, sticky="ns")
         self.header_gutter.grid_propagate(False)
+        table_wrap.grid_columnconfigure(1, minsize=self._scroll_gutter, weight=0)
 
         self.header = tk.Frame(
             self.header_canvas, bg=self.BORDER_COLOR, bd=0, highlightthickness=0
@@ -962,7 +964,7 @@ class DataTable(ctk.CTkFrame):
         self._hscroll_corner = tk.Frame(
             table_wrap,
             bg=self.HEADER_BG,
-            width=self.SCROLL_GUTTER,
+            width=self._scroll_gutter,
             bd=0,
             highlightthickness=0,
         )
@@ -1006,6 +1008,9 @@ class DataTable(ctk.CTkFrame):
         self.after(50, self._sync_column_widths)
         # 根窗口尺寸变化（含全屏）时补一次同步，避免仅切换菜单才恢复
         self.bind("<Configure>", self._on_self_configure, add="+")
+        # Windows 滚动条宽度常与固定 gutter 不一致，映射后再实测对齐
+        self.after(80, self._sync_scroll_gutter)
+        self.after(200, self._sync_scroll_gutter)
 
     def _bind_wheel(self, widget: tk.Misc) -> None:
         widget.bind("<MouseWheel>", self._on_mousewheel, add="+")
@@ -1064,14 +1069,58 @@ class DataTable(ctk.CTkFrame):
         if self.canvas.xview() != (float(first), float(last)):
             self.canvas.xview_moveto(float(first))
 
+    def _sync_scroll_gutter(self) -> None:
+        """表头右侧占位与纵向滚动条同宽，避免 Windows 下边框错位。"""
+        if not self.winfo_exists():
+            return
+        gutter = self.SCROLL_GUTTER
+        try:
+            self.scrollbar.update_idletasks()
+            measured = int(self.scrollbar.winfo_width())
+            if measured <= 1:
+                measured = int(self.scrollbar.winfo_reqwidth())
+            if measured > 1:
+                gutter = measured
+        except tk.TclError:
+            pass
+        if gutter == self._scroll_gutter:
+            return
+        self._scroll_gutter = gutter
+        try:
+            self.header_gutter.configure(width=gutter)
+            self._hscroll_corner.configure(width=gutter)
+            self.table_wrap.grid_columnconfigure(1, minsize=gutter, weight=0)
+        except tk.TclError:
+            return
+        # 占位宽度变化后重新分摊列宽，保证表头/表体列线对齐
+        self._sync_column_widths()
+
+    def _frame_content_width(self) -> int:
+        """表头与表体共用同一内容宽度，避免 Windows 下各自 reqwidth 不一致导致边框错位。"""
+        body_w = 1
+        header_w = 1
+        try:
+            if self.body.winfo_exists():
+                self.body.update_idletasks()
+                body_w = max(1, int(self.body.winfo_reqwidth()))
+            if self.header.winfo_exists():
+                self.header.update_idletasks()
+                header_w = max(1, int(self.header.winfo_reqwidth()))
+        except tk.TclError:
+            pass
+        return max(int(self._table_content_width), body_w, header_w, 1)
+
     def _pin_body_window(self) -> None:
         """将表体窗口钉在画布坐标原点，并固定 scrollregion，避免滚动后与表头脱节。"""
         if not self.canvas.winfo_exists():
             return
         self.canvas.coords(self._canvas_window, 0, 0)
-        self.body.update_idletasks()
-        width = max(self._table_content_width, self.body.winfo_reqwidth(), 1)
-        height = max(self.body.winfo_reqheight(), 1)
+        width = self._frame_content_width()
+        height = 1
+        try:
+            height = max(self.body.winfo_reqheight(), 1)
+        except tk.TclError:
+            pass
         self.canvas.itemconfigure(self._canvas_window, width=width)
         # 强制从 (0,0) 起算，避免 bbox 漂移留下顶部空隙
         self.canvas.configure(scrollregion=(0, 0, width, height))
@@ -1093,9 +1142,12 @@ class DataTable(ctk.CTkFrame):
         if not self.header_canvas.winfo_exists():
             return
         self.header_canvas.coords(self._header_window, 0, 0)
-        self.header.update_idletasks()
-        width = max(self._table_content_width, self.header.winfo_reqwidth(), 1)
-        content_h = max(self.header.winfo_reqheight(), 1)
+        width = self._frame_content_width()
+        content_h = 1
+        try:
+            content_h = max(self.header.winfo_reqheight(), 1)
+        except tk.TclError:
+            pass
         height = max(content_h, self._header_min_height())
         # 同步窗口高度，避免画布高于表头内容时底部露出空隙、与表体分离
         self.header_canvas.itemconfigure(
@@ -1165,14 +1217,15 @@ class DataTable(ctk.CTkFrame):
         page_rows = self._page_rows()
         for idx, (col_id, heading, _) in enumerate(self._columns):
             needed = (
-                self._measure_text_width(heading, header=True) + self.CELL_PADX * 2 + 4
+                self._measure_text_width(heading, header=True) + self.CELL_PADX * 2 + 8
             )
             widths[idx] = max(widths[idx], needed)
             if col_id not in self._fit_content_columns:
                 continue
             for row in page_rows:
                 text = self._cell_plain_text(row[idx] if idx < len(row) else "")
-                content = self._measure_text_width(text) + self.CELL_PADX * 2 + 4
+                # Windows 字体实测常略宽于 measure，多留几像素避免贴边触发折行
+                content = self._measure_text_width(text) + self.CELL_PADX * 2 + 8
                 widths[idx] = max(widths[idx], content)
         return widths
 
@@ -1255,7 +1308,9 @@ class DataTable(ctk.CTkFrame):
     def _available_viewport_width(self) -> int:
         available = self.canvas.winfo_width()
         if available <= 1:
-            available = max(1, self.table_wrap.winfo_width() - self.SCROLL_GUTTER - 2)
+            available = max(
+                1, self.table_wrap.winfo_width() - self._scroll_gutter - 2
+            )
         return int(available)
 
     def _apply_redistributed_widths(self, available: int) -> None:
@@ -1416,9 +1471,10 @@ class DataTable(ctk.CTkFrame):
             self.header_canvas.xview_moveto(0)
 
     def _on_table_configure(self, event=None) -> None:
+        self._sync_scroll_gutter()
         width = 0
         if event is not None and getattr(event, "width", 0):
-            width = int(event.width) - self.SCROLL_GUTTER - 2
+            width = int(event.width) - self._scroll_gutter - 2
         if width <= 1:
             width = self._available_viewport_width()
         self._sync_columns_for_viewport(width)

@@ -236,8 +236,8 @@ class LeasesPage(ctk.CTkFrame):
                 ("id", "ID", 48),
                 ("project", "项目", 110),
                 ("room", "房间", 70),
-                ("deposit", "押金", 70),
-                ("rent", "月租金", 70),
+                ("deposit", "押金", 88),
+                ("rent", "月租金", 88),
                 ("period", "缴费周期", 72),
                 ("term", "租期", 150),
                 ("free", "免租期", 150),
@@ -259,7 +259,7 @@ class LeasesPage(ctk.CTkFrame):
             style_prefix="TallyLease",
             rowheight=28,
             cell_pady=2,
-            fit_content_columns=("term", "free"),
+            fit_content_columns=("deposit", "rent", "term", "free"),
         )
         self.table.grid(row=1, column=0, sticky="nsew")
 

@@ -253,7 +253,8 @@ def billing_month_count(start: date, end: date) -> float:
 
 
 def format_money(value: float) -> str:
-    return f"{value:,.2f}"
+    # 千分位使用窄不间断空格，避免表格 wraplength 从逗号/小数点处折断金额
+    return f"{value:,.2f}".replace(",", "\u202f")
 
 
 def format_dt(value: object) -> str:
