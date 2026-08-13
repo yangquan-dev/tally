@@ -71,18 +71,32 @@ class RoomsPage(ctk.CTkFrame):
 
         filter_box = ctk.CTkFrame(header, fg_color="transparent")
         filter_box.grid(row=0, column=1, sticky="e", padx=(12, 8))
-        ctk.CTkLabel(filter_box, text="项目筛选", text_color="#6b7280").pack(
+        ctk.CTkLabel(filter_box, text="项目", text_color="#6b7280").pack(
             side="left", padx=(0, 8)
         )
-        self.filter_var = ctk.StringVar(value="全部项目")
-        self.filter_menu = ctk.CTkOptionMenu(
+        self.project_var = ctk.StringVar(value="全部项目")
+        self.project_menu = ctk.CTkOptionMenu(
             filter_box,
             values=["全部项目"],
-            variable=self.filter_var,
-            command=lambda _v: self.refresh(),
-            width=180,
+            variable=self.project_var,
+            command=self._on_project_filter_changed,
+            width=110,
+            dynamic_resizing=False,
         )
-        self.filter_menu.pack(side="left")
+        self.project_menu.pack(side="left")
+        ctk.CTkLabel(filter_box, text="房间号", text_color="#6b7280").pack(
+            side="left", padx=(12, 8)
+        )
+        self.room_var = ctk.StringVar(value="全部房间")
+        self.room_menu = ctk.CTkOptionMenu(
+            filter_box,
+            values=["全部房间"],
+            variable=self.room_var,
+            command=lambda _v: self.refresh(),
+            width=110,
+            dynamic_resizing=False,
+        )
+        self.room_menu.pack(side="left")
 
         actions = ctk.CTkFrame(header, fg_color="transparent")
         actions.grid(row=0, column=2, sticky="e")
@@ -147,33 +161,56 @@ class RoomsPage(ctk.CTkFrame):
 
     def set_project_filter(self, project_id: int | None) -> None:
         self.filter_project_id = project_id
-        self._reload_filters()
+        self._reload_project_filters()
         if project_id is None:
-            self.filter_var.set("全部项目")
+            self.project_var.set("全部项目")
         else:
             project = self.services.projects.get(project_id)
             if project:
-                self.filter_var.set(project.name)
+                self.project_var.set(project.name)
+        self._reload_room_filters(preserve_selection=False)
         self.refresh()
 
-    def _reload_filters(self) -> None:
+    def _reload_project_filters(self) -> None:
         if self.services.projects is None:
             return
         projects = self.services.projects.list_all()  # 按项目创建顺序
-        current = self.filter_var.get()
+        current = self.project_var.get()
         values = ["全部项目"] + [p.name for p in projects]
-        self.filter_menu.configure(values=values)
+        self.project_menu.configure(values=values)
         if current in values:
-            self.filter_var.set(current)
+            self.project_var.set(current)
         else:
-            self.filter_var.set("全部项目")
+            self.project_var.set("全部项目")
+        self._reload_room_filters(preserve_selection=True)
+
+    def _reload_room_filters(self, preserve_selection: bool = True) -> None:
+        if self.services.rooms is None:
+            return
+        project_id = self._current_project_id()
+        if project_id is None:
+            values = ["全部房间"]
+        else:
+            rooms = self.services.rooms.list_by_project(project_id)
+            room_nos = sorted({r.room_no for r in rooms}, key=lambda x: (len(x), x))
+            values = ["全部房间"] + room_nos
+        current = self.room_var.get() if preserve_selection else "全部房间"
+        self.room_menu.configure(values=values)
+        if current in values:
+            self.room_var.set(current)
+        else:
+            self.room_var.set("全部房间")
+
+    def _on_project_filter_changed(self, _value: str) -> None:
+        self._reload_room_filters(preserve_selection=False)
+        self.refresh()
 
     def _selected_id(self) -> int | None:
         iid = self.table.selected_iid()
         return int(iid) if iid else None
 
     def _current_project_id(self) -> int | None:
-        name = self.filter_var.get()
+        name = self.project_var.get()
         if name == "全部项目":
             return None
         for p in self.services.projects.list_all():
@@ -181,10 +218,16 @@ class RoomsPage(ctk.CTkFrame):
                 return p.id
         return None
 
+    def _current_room_no(self) -> str | None:
+        room_no = self.room_var.get().strip()
+        if not room_no or room_no == "全部房间":
+            return None
+        return room_no
+
     def refresh(self) -> None:
         if not self.services.is_ready or self.services.rooms is None:
             return
-        self._reload_filters()
+        self._reload_project_filters()
         project_id = self._current_project_id()
         rooms = (
             self.services.rooms.list_by_project(project_id)
@@ -199,6 +242,9 @@ class RoomsPage(ctk.CTkFrame):
             if project_id is not None
             else self.services.rooms.list_all()
         )
+        room_no = self._current_room_no()
+        if room_no is not None:
+            rooms = [r for r in rooms if r.room_no == room_no]
         rows = [
             (r.id, r.project_name, r.room_no, f"{r.area:.2f}", r.lease_status)
             for r in rooms

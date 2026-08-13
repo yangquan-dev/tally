@@ -60,6 +60,7 @@ class LeaseFormDialog(FormDialog):
 
         self.project_var = ctk.StringVar(value=init_project)
         self.room_var = ctk.StringVar(value=init_room)
+        self.tenant_var = ctk.StringVar(value=str(initial.get("tenant", "")))
         self.deposit_var = ctk.StringVar(value=str(initial.get("deposit", "")))
         self.rent_var = ctk.StringVar(value=str(initial.get("monthly_rent", "")))
         init_period = initial.get("payment_period") or DEFAULT_PAYMENT_PERIOD
@@ -75,11 +76,15 @@ class LeaseFormDialog(FormDialog):
             values=project_names or ["无项目"],
             variable=self.project_var,
             command=self._on_project_changed,
+            width=200,
+            dynamic_resizing=False,
         )
         self.room_menu = ctk.CTkOptionMenu(
             self.body,
             values=self._room_values_for(init_project),
             variable=self.room_var,
+            width=200,
+            dynamic_resizing=False,
         )
         if lock_room or not project_names:
             self.project_menu.configure(state="disabled")
@@ -87,10 +92,11 @@ class LeaseFormDialog(FormDialog):
 
         self.add_field(0, "项目", self.project_menu)
         self.add_field(1, "房间", self.room_menu)
-        self.add_field(2, "押金", ctk.CTkEntry(self.body, textvariable=self.deposit_var))
-        self.add_field(3, "月租金", ctk.CTkEntry(self.body, textvariable=self.rent_var))
+        self.add_field(2, "租赁方", ctk.CTkEntry(self.body, textvariable=self.tenant_var))
+        self.add_field(3, "押金", ctk.CTkEntry(self.body, textvariable=self.deposit_var))
+        self.add_field(4, "月租金", ctk.CTkEntry(self.body, textvariable=self.rent_var))
         self.add_field(
-            4,
+            5,
             "缴费周期",
             ctk.CTkOptionMenu(
                 self.body,
@@ -98,12 +104,12 @@ class LeaseFormDialog(FormDialog):
                 variable=self.payment_period_var,
             ),
         )
-        self.add_field(5, "起租时间", DatePickerField(self.body, textvariable=self.start_var))
-        self.add_field(6, "到期时间", DatePickerField(self.body, textvariable=self.end_var))
+        self.add_field(6, "起租时间", DatePickerField(self.body, textvariable=self.start_var))
+        self.add_field(7, "到期时间", DatePickerField(self.body, textvariable=self.end_var))
 
         free_initial = initial.get("free_periods") or []
         self.free_editor = FreePeriodsEditor(self.body, initial=free_initial)
-        self.free_editor.grid(row=7, column=0, columnspan=2, sticky="ew", pady=8)
+        self.free_editor.grid(row=8, column=0, columnspan=2, sticky="ew", pady=8)
 
         discount_initial = initial.get("discounts") or []
         self.discount_editor = DiscountPeriodsEditor(
@@ -113,9 +119,9 @@ class LeaseFormDialog(FormDialog):
             lease_end_var=self.end_var,
             monthly_rent_var=self.rent_var,
         )
-        self.discount_editor.grid(row=8, column=0, columnspan=2, sticky="ew", pady=8)
+        self.discount_editor.grid(row=9, column=0, columnspan=2, sticky="ew", pady=8)
 
-        next_row = 9
+        next_row = 10
         if allow_status:
             self.add_field(
                 next_row,
@@ -145,6 +151,9 @@ class LeaseFormDialog(FormDialog):
         raise ValueError("请选择有效的项目和房间")
 
     def collect(self) -> dict:
+        tenant = self.tenant_var.get().strip()
+        if not tenant:
+            raise ValueError("租赁方不能为空")
         period = self.payment_period_var.get().strip()
         if not period:
             raise ValueError("缴费周期不能为空")
@@ -152,6 +161,7 @@ class LeaseFormDialog(FormDialog):
             raise ValueError("缴费周期无效")
         return {
             "room_id": self._selected_room_id(),
+            "tenant": tenant,
             "deposit": parse_float(self.deposit_var.get(), "押金"),
             "monthly_rent": parse_float(self.rent_var.get(), "月租金"),
             "payment_period": period,
@@ -188,7 +198,8 @@ class LeasesPage(ctk.CTkFrame):
             values=["全部项目"],
             variable=self.project_var,
             command=self._on_project_filter_changed,
-            width=140,
+            width=110,
+            dynamic_resizing=False,
         )
         self.project_menu.pack(side="left")
         ctk.CTkLabel(filter_box, text="房间号", text_color="#6b7280").pack(
@@ -201,6 +212,7 @@ class LeasesPage(ctk.CTkFrame):
             variable=self.room_var,
             command=lambda _v: self.refresh(),
             width=110,
+            dynamic_resizing=False,
         )
         self.room_menu.pack(side="left")
         ctk.CTkLabel(filter_box, text="状态", text_color="#6b7280").pack(
@@ -213,6 +225,7 @@ class LeasesPage(ctk.CTkFrame):
             variable=self.status_var,
             command=lambda _v: self.refresh(),
             width=90,
+            dynamic_resizing=False,
         ).pack(side="left")
 
         actions = ctk.CTkFrame(header, fg_color="transparent")
@@ -224,9 +237,6 @@ class LeasesPage(ctk.CTkFrame):
             side="left", padx=4
         )
         ctk.CTkButton(
-            actions, text="结束租赁", width=100, command=self.end_lease
-        ).pack(side="left", padx=4)
-        ctk.CTkButton(
             actions, text="删除", width=80, fg_color="#b91c1c", command=self.delete_lease
         ).pack(side="left", padx=4)
 
@@ -236,6 +246,7 @@ class LeasesPage(ctk.CTkFrame):
                 ("id", "ID", 48),
                 ("project", "项目", 110),
                 ("room", "房间", 70),
+                ("tenant", "租赁方", 100),
                 ("deposit", "押金", 88),
                 ("rent", "月租金", 88),
                 ("period", "缴费周期", 72),
@@ -248,6 +259,7 @@ class LeasesPage(ctk.CTkFrame):
                 "id": "center",
                 "project": "w",
                 "room": "center",
+                "tenant": "w",
                 "deposit": "e",
                 "rent": "e",
                 "period": "center",
@@ -340,6 +352,7 @@ class LeasesPage(ctk.CTkFrame):
                     lease.id,
                     lease.project_name,
                     lease.room_no,
+                    lease.tenant or "",
                     format_money(lease.deposit),
                     format_money(lease.monthly_rent),
                     lease.payment_period,
@@ -362,6 +375,7 @@ class LeasesPage(ctk.CTkFrame):
         try:
             self.services.leases.create(  # type: ignore[union-attr]
                 room_id=data["room_id"],
+                tenant=data["tenant"],
                 deposit=data["deposit"],
                 monthly_rent=data["monthly_rent"],
                 start_date=data["start_date"],
@@ -404,6 +418,7 @@ class LeasesPage(ctk.CTkFrame):
             {
                 "project_name": lease.project_name,
                 "room_no": lease.room_no,
+                "tenant": lease.tenant,
                 "deposit": lease.deposit,
                 "monthly_rent": lease.monthly_rent,
                 "payment_period": lease.payment_period,
@@ -421,6 +436,7 @@ class LeasesPage(ctk.CTkFrame):
         try:
             self.services.leases.update(  # type: ignore[union-attr]
                 lease_id,
+                tenant=data["tenant"],
                 deposit=data["deposit"],
                 monthly_rent=data["monthly_rent"],
                 start_date=data["start_date"],
@@ -432,40 +448,6 @@ class LeasesPage(ctk.CTkFrame):
             )
             self.refresh()
         except (ValidationError, ValueError) as exc:
-            show_error(str(exc))
-
-    def end_lease(self) -> None:
-        lease_id = self._selected_id()
-        if lease_id is None:
-            show_info("请先选择一条租赁")
-            return
-        lease = self.services.leases.get(lease_id)  # type: ignore[union-attr]
-        if not lease:
-            return
-        if lease.status != "生效":
-            show_info("该租赁已是结束状态")
-            return
-        if not ask_yes_no("确认结束该租赁？"):
-            return
-        try:
-            self.services.leases.update(  # type: ignore[union-attr]
-                lease_id,
-                deposit=lease.deposit,
-                monthly_rent=lease.monthly_rent,
-                start_date=lease.start_date,
-                end_date=lease.end_date,
-                free_periods=[
-                    (p.start_date, p.end_date) for p in (lease.free_periods or [])
-                ],
-                status="结束",
-                payment_period=lease.payment_period,
-                discounts=[
-                    (d.start_date, d.end_date, d.kind, d.value)
-                    for d in (lease.discounts or [])
-                ],
-            )
-            self.refresh()
-        except ValidationError as exc:
             show_error(str(exc))
 
     def delete_lease(self) -> None:

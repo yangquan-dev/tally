@@ -133,6 +133,7 @@ class Lease:
     end_date: date
     status: str
     payment_period: str = DEFAULT_PAYMENT_PERIOD
+    tenant: str = ""
     free_periods: list[FreePeriod] | None = None
     discounts: list[LeaseDiscount] | None = None
     room_no: str = ""
@@ -146,6 +147,7 @@ class Lease:
         if self.discounts is None:
             self.discounts = []
         self.payment_period = normalize_payment_period(self.payment_period)
+        self.tenant = (self.tenant or "").strip()
 
     @property
     def period_months(self) -> int:
@@ -165,6 +167,7 @@ class Lease:
             payment_period=normalize_payment_period(
                 row["payment_period"] if "payment_period" in keys else None
             ),
+            tenant=row["tenant"] if "tenant" in keys else "",
             free_periods=[],
             discounts=[],
             room_no=row["room_no"] if "room_no" in keys else "",
@@ -267,6 +270,7 @@ class ReminderItem:
     amount: float  # 剩余应缴；合同类为月租
     days_delta: int
     detail: str
+    tenant: str = ""  # 租赁方
     due_amount: float = 0.0  # 应缴（折减前）
     paid_amount: float = 0.0  # 已缴
     discount_amount: float = 0.0  # 折/减

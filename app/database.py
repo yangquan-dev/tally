@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS rooms (
 CREATE TABLE IF NOT EXISTS leases (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     room_id INTEGER NOT NULL,
+    tenant TEXT NOT NULL DEFAULT '',
     deposit REAL NOT NULL DEFAULT 0,
     monthly_rent REAL NOT NULL DEFAULT 0,
     start_date TEXT NOT NULL,
@@ -110,6 +111,7 @@ class Database:
             self._migrate_free_periods(conn)
             self._migrate_drop_project_address(conn)
             self._migrate_lease_payment_period(conn)
+            self._migrate_lease_tenant(conn)
             self._migrate_payment_timestamps(conn)
             self._migrate_free_period_amount(conn)
 
@@ -120,6 +122,15 @@ class Database:
             return
         conn.execute(
             "ALTER TABLE leases ADD COLUMN payment_period TEXT NOT NULL DEFAULT '季度'"
+        )
+
+    def _migrate_lease_tenant(self, conn: sqlite3.Connection) -> None:
+        """为已有租赁补充租赁方。"""
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(leases)").fetchall()}
+        if "tenant" in cols:
+            return
+        conn.execute(
+            "ALTER TABLE leases ADD COLUMN tenant TEXT NOT NULL DEFAULT ''"
         )
 
     def _migrate_payment_timestamps(self, conn: sqlite3.Connection) -> None:

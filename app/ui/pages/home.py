@@ -3,7 +3,7 @@ from __future__ import annotations
 import customtkinter as ctk
 
 from app.services import AppServices
-from app.ui.utils import format_date_range, format_money
+from app.ui.utils import format_date_range, format_money, format_remaining_due_formula
 from app.ui.widgets import DataTable
 
 
@@ -84,6 +84,7 @@ class HomePage(ctk.CTkFrame):
                 ("kind", "类型", 110),
                 ("project", "项目", 120),
                 ("room", "房间", 70),
+                ("tenant", "租赁方", 100),
                 ("amount", "剩余应缴", 160),
                 ("period", "周期", 190),
             ],
@@ -92,6 +93,7 @@ class HomePage(ctk.CTkFrame):
                 "kind": "center",
                 "project": "w",
                 "room": "center",
+                "tenant": "w",
                 "amount": "w",
                 "period": "center",
             },
@@ -173,6 +175,7 @@ class HomePage(ctk.CTkFrame):
                     item.kind,
                     item.project_name,
                     item.room_no,
+                    item.tenant or "",
                     self._amount_display(item),
                     period,
                 )
@@ -186,12 +189,17 @@ class HomePage(ctk.CTkFrame):
         if item.kind in {"合同即将到期", "合同已到期"}:
             return f"月租 {format_money(item.amount)}"
         # 剩余应缴金额（含英文括号）整段标红，避免拆 Label 产生缝隙
+        body = format_remaining_due_formula(
+            item.amount,
+            item.due_amount,
+            item.paid_amount,
+            item.free_amount,
+            item.discount_amount,
+            with_prefix=False,
+        )
+        amount_token = f"({item.amount:.2f})"
         return [
             ("剩余应缴", None),
-            (f"({item.amount:g})", "#b91c1c"),
-            (
-                f"=应缴({item.due_amount:g})-已缴({item.paid_amount:g})-"
-                f"免租({item.free_amount:g})-折/减({item.discount_amount:g})",
-                None,
-            ),
+            (amount_token, "#b91c1c"),
+            (body[len(amount_token) :], None),
         ]

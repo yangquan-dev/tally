@@ -4,7 +4,7 @@ from calendar import monthrange
 from dataclasses import replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Sequence
 
 from app.bootstrap import BootstrapConfig
 from app.database import Database
@@ -564,7 +564,11 @@ class LeaseService:
         payment_period: str = DEFAULT_PAYMENT_PERIOD,
         discounts: list[tuple[date, date, str, float]] | list[LeaseDiscount]
         | None = None,
+        tenant: str = "",
     ) -> int:
+        tenant_name = (tenant or "").strip()
+        if not tenant_name:
+            raise ValidationError("租赁方不能为空")
         normalized, period, normalized_discounts = self._validate(
             room_id,
             deposit,
@@ -584,6 +588,7 @@ class LeaseService:
             normalized,
             period,
             normalized_discounts,
+            tenant=tenant_name,
         )
         self.room_service.refresh_status(room_id)
         return lease_id
@@ -600,12 +605,19 @@ class LeaseService:
         payment_period: str = DEFAULT_PAYMENT_PERIOD,
         discounts: list[tuple[date, date, str, float]] | list[LeaseDiscount]
         | None = None,
+        tenant: str | None = None,
     ) -> None:
         lease = self.repo.get(lease_id)
         if not lease:
             raise ValidationError("租赁不存在")
         if status not in {"生效", "结束"}:
             raise ValidationError("租赁状态无效")
+        tenant_name = (
+            (tenant if tenant is not None else lease.tenant) or ""
+        ).strip()
+        # 生效合同必须填写租赁方；结束旧数据可保留空值以便兼容迁移
+        if status == "生效" and not tenant_name:
+            raise ValidationError("租赁方不能为空")
         periods = free_periods if free_periods is not None else (lease.free_periods or [])
         discount_items = (
             discounts if discounts is not None else (lease.discounts or [])
@@ -644,6 +656,7 @@ class LeaseService:
             status,
             period,
             normalized_discounts,
+            tenant=tenant_name,
         )
         self.room_service.refresh_status(lease.room_id)
 
@@ -705,10 +718,10 @@ class PaymentService:
         *,
         exclude_payment_id: Optional[int] = None,
     ) -> None:
-        """同一应收期内可多次缴费，累计分摊金额不得超过该期应缴。"""
+        """缴费可覆盖连续多个应收期；按 FIFO 分摊后，各期累计不得超过该期应缴。"""
         reminder_svc = ReminderService(self.db)
         candidate = Payment(
-            id=0,
+            id=exclude_payment_id or 0,
             lease_id=lease.id,
             period_start=period_start,
             period_end=period_end,
@@ -716,28 +729,46 @@ class PaymentService:
             paid_at=period_start,
             note="",
         )
-        existing = [
-            pay
-            for pay in self.repo.list_by_lease(lease.id)
-            if exclude_payment_id is None or pay.id != exclude_payment_id
+        periods = reminder_svc._chargeable_periods(lease)
+        covered = [
+            period
+            for period in periods
+            if ReminderService._payment_overlaps_period(candidate, period)
         ]
-        for period in reminder_svc.generate_rent_periods(lease):
-            if period.amount <= 0:
-                continue
-            new_credit = ReminderService._payment_credit_for_period(candidate, period)
-            if new_credit <= 0:
-                continue
-            old_credit = sum(
-                ReminderService._payment_credit_for_period(pay, period)
-                for pay in existing
-            )
+        if not covered:
+            raise ValidationError("缴费起止未覆盖任何应收期")
+
+        paid_before = reminder_svc.paid_map_for_lease(
+            lease, exclude_payment_id=exclude_payment_id
+        )
+        room_total = 0.0
+        for period in covered:
+            key = ReminderService._period_key(period)
             due = round(float(period.amount), 2)
-            total = round(old_credit + new_credit, 2)
+            already = round(paid_before.get(key, 0.0), 2)
+            room_total += max(0.0, due - already)
+        room_total = round(room_total, 2)
+        if amount > room_total + 0.009:
+            raise ValidationError(
+                f"所选连续应收期剩余应缴合计 ¥{room_total:.2f}，"
+                f"当次缴纳不能超过该合计"
+            )
+
+        paid_after = reminder_svc.paid_map_for_lease(
+            lease,
+            exclude_payment_id=exclude_payment_id,
+            extra_payment=candidate,
+        )
+        for period in covered:
+            key = ReminderService._period_key(period)
+            due = round(float(period.amount), 2)
+            total = round(paid_after.get(key, 0.0), 2)
             if total > due + 0.009:
-                remaining = round(max(0.0, due - old_credit), 2)
+                already = round(paid_before.get(key, 0.0), 2)
+                remaining = round(max(0.0, due - already), 2)
                 raise ValidationError(
                     f"应收期 {period.period_start} ~ {period.period_end} "
-                    f"应缴 ¥{due:.2f}，已缴 ¥{old_credit:.2f}，"
+                    f"应缴 ¥{due:.2f}，已缴 ¥{already:.2f}，"
                     f"本次最多可缴 ¥{remaining:.2f}"
                 )
 
@@ -1013,10 +1044,94 @@ class ReminderService:
         return round(base, 2)
 
     @staticmethod
+    def _period_key(period: RentPeriod) -> tuple[date, date]:
+        return (period.period_start, period.period_end)
+
+    @staticmethod
+    def _payment_overlaps_period(payment: Payment, period: RentPeriod) -> bool:
+        return not (
+            payment.period_end < period.period_start
+            or payment.period_start > period.period_end
+        )
+
+    def _chargeable_periods(self, lease: Lease) -> list[RentPeriod]:
+        return [
+            period
+            for period in self.generate_rent_periods(lease)
+            if (not period.fully_free) and float(period.amount) > 0
+        ]
+
+    def _allocate_payments_fifo(
+        self,
+        lease: Lease,
+        payments: Sequence[Payment],
+    ) -> dict[tuple[date, date], float]:
+        """按应收期时间顺序，将各笔缴费依次填满覆盖区间内的应缴（一对多）。"""
+        periods = self._chargeable_periods(lease)
+        paid: dict[tuple[date, date], float] = {
+            self._period_key(period): 0.0 for period in periods
+        }
+        if not periods:
+            return paid
+        ordered = sorted(payments, key=lambda pay: (pay.paid_at, pay.id))
+        for payment in ordered:
+            left = round(float(payment.amount), 2)
+            if left <= 0:
+                continue
+            for period in periods:
+                if left <= 0.009:
+                    break
+                if not self._payment_overlaps_period(payment, period):
+                    continue
+                key = self._period_key(period)
+                room = round(float(period.amount) - paid[key], 2)
+                if room <= 0.009:
+                    continue
+                take = round(min(left, room), 2)
+                paid[key] = round(paid[key] + take, 2)
+                left = round(left - take, 2)
+        return paid
+
+    def covered_rent_periods(
+        self, lease: Lease, payment: Payment
+    ) -> list[RentPeriod]:
+        """返回一笔缴费覆盖的应收期（按时间顺序，用于列表分行展示）。"""
+        return [
+            period
+            for period in self._chargeable_periods(lease)
+            if self._payment_overlaps_period(payment, period)
+        ]
+
+    def paid_map_for_lease(
+        self,
+        lease: Lease,
+        *,
+        exclude_payment_id: Optional[int] = None,
+        extra_payment: Optional[Payment] = None,
+    ) -> dict[tuple[date, date], float]:
+        payments = [
+            pay
+            for pay in self.payment_repo.list_by_lease(lease.id)
+            if exclude_payment_id is None or pay.id != exclude_payment_id
+        ]
+        if extra_payment is not None:
+            payments.append(extra_payment)
+        return self._allocate_payments_fifo(lease, payments)
+
+    @staticmethod
     def _payment_credit_for_period(payment: Payment, period: RentPeriod) -> float:
-        """将一笔缴费按日期重叠比例分摊到应收期。"""
-        if payment.period_end < period.period_start or payment.period_start > period.period_end:
+        """单笔缴费在不与其他缴费竞争时，按 FIFO 分摊到指定应收期的金额。
+
+        多笔累计请使用 paid_map_for_lease / paid_amount_for_period。
+        """
+        if not ReminderService._payment_overlaps_period(payment, period):
             return 0.0
+        # 仅覆盖单期时整笔计入；跨多期时需结合租约全部应收期顺序，由 paid_map 处理
+        if (
+            payment.period_start == period.period_start
+            and payment.period_end == period.period_end
+        ):
+            return round(min(float(payment.amount), float(period.amount)), 2)
         pay_days = (payment.period_end - payment.period_start).days + 1
         if pay_days <= 0:
             return 0.0
@@ -1025,7 +1140,8 @@ class ReminderService:
         overlap_days = (overlap_end - overlap_start).days + 1
         if overlap_days <= 0:
             return 0.0
-        return float(payment.amount) * overlap_days / pay_days
+        # 兼容旧数据中非完整期对齐的跨段记录：仍按重叠天数估算
+        return round(float(payment.amount) * overlap_days / pay_days, 2)
 
     def paid_amount_for_period(
         self,
@@ -1034,13 +1150,13 @@ class ReminderService:
         *,
         exclude_payment_id: Optional[int] = None,
     ) -> float:
-        payments = self.payment_repo.list_by_lease(lease_id)
-        total = sum(
-            self._payment_credit_for_period(pay, period)
-            for pay in payments
-            if exclude_payment_id is None or pay.id != exclude_payment_id
+        lease = self.lease_repo.get(lease_id)
+        if not lease:
+            return 0.0
+        paid_map = self.paid_map_for_lease(
+            lease, exclude_payment_id=exclude_payment_id
         )
-        return round(total, 2)
+        return round(paid_map.get(self._period_key(period), 0.0), 2)
 
     def remaining_amount_for_period(
         self,
@@ -1102,6 +1218,7 @@ class ReminderService:
                         amount=lease.monthly_rent,
                         days_delta=days_to_end,
                         detail=f"合同将于 {lease.end_date.isoformat()} 到期",
+                        tenant=lease.tenant or "",
                     )
                 )
             elif days_to_end < 0:
@@ -1118,6 +1235,7 @@ class ReminderService:
                         amount=lease.monthly_rent,
                         days_delta=days_to_end,
                         detail=f"合同已于 {lease.end_date.isoformat()} 到期",
+                        tenant=lease.tenant or "",
                     )
                 )
 
@@ -1161,6 +1279,7 @@ class ReminderService:
                         amount=remaining,
                         days_delta=days_delta,
                         detail=detail,
+                        tenant=lease.tenant or "",
                         due_amount=due,
                         paid_amount=paid,
                         discount_amount=discount,

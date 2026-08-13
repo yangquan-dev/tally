@@ -11,8 +11,15 @@ class ProjectFormDialog(FormDialog):
     def __init__(self, master, title: str, initial: dict | None = None) -> None:
         super().__init__(master, title, height=220)
         initial = initial or {}
-        self.name_var = ctk.StringVar(value=initial.get("name", ""))
-        self.add_field(0, "项目名称", ctk.CTkEntry(self.body, textvariable=self.name_var))
+        name = str(initial.get("name") or "").strip()
+        self.name_var = ctk.StringVar(master=self, value=name)
+        self.name_entry = ctk.CTkEntry(self.body, textvariable=self.name_var)
+        self.add_field(0, "项目名称", self.name_entry)
+        # 显式写入，避免部分环境下 StringVar 初值未同步到输入框
+        if name:
+            self.name_var.set(name)
+            self.name_entry.delete(0, "end")
+            self.name_entry.insert(0, name)
 
     def collect(self) -> dict:
         return {"name": self.name_var.get().strip()}
@@ -80,7 +87,7 @@ class ProjectsPage(ctk.CTkFrame):
             self,
             columns=[
                 ("id", "ID", 60),
-                ("name", "项目名称", 360),
+                ("name", "项目", 360),
                 ("created_at", "创建时间", 200),
             ],
             column_anchors={
@@ -125,19 +132,20 @@ class ProjectsPage(ctk.CTkFrame):
         if project_id is None:
             show_info("请先选择一个项目")
             return
-        project = self.services.projects.get(project_id)
+        project = self.services.projects.get(project_id)  # type: ignore[union-attr]
         if not project:
             show_error("项目不存在")
             return
+        name = (project.name or "").strip()
         data = ProjectFormDialog(
             self,
             "编辑项目",
-            {"name": project.name},
+            {"name": name},
         ).show()
         if not data:
             return
         try:
-            self.services.projects.update(project_id, **data)
+            self.services.projects.update(project_id, **data)  # type: ignore[union-attr]
             self.refresh()
         except (ValidationError, ValueError) as exc:
             show_error(str(exc))

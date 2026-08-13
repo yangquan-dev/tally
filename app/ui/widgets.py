@@ -1249,7 +1249,8 @@ class DataTable(ctk.CTkFrame):
         if not text:
             return 1
         if self._is_fit_content_col(col_idx):
-            return 1
+            # fit_content 不按列宽折行，但仍按显式换行增高（如多缴费周期）
+            return min(self.MAX_WRAP_LINES, max(1, str(text).count("\n") + 1))
         per_line = self._chars_per_line(col_idx)
         total = 0
         for part in str(text).split("\n"):
@@ -1873,6 +1874,7 @@ class FormDialog(ctk.CTkToplevel):
         self.title(title)
         self.resizable(False, bool(scrollable))
         self.transient(master)
+        # 先隐藏，等子类填完字段后再在 show() 中显示，避免空窗闪烁与回填时序问题
         self.withdraw()
         try:
             screen_h = int(self.winfo_screenheight())
@@ -1882,10 +1884,6 @@ class FormDialog(ctk.CTkToplevel):
         self._dialog_width = width
         self._dialog_height = height
         self.geometry(f"{width}x{height}")
-        center_window(self, width, height)
-        self.deiconify()
-        self.grab_set()
-        self.lift()
         self.result: Optional[dict] = None
 
         self.grid_columnconfigure(0, weight=1)
@@ -1906,9 +1904,6 @@ class FormDialog(ctk.CTkToplevel):
         ).grid(row=0, column=1, padx=(0, 8))
         self.ok_btn = ctk.CTkButton(self.button_bar, text="保存", width=90, command=self._on_ok)
         self.ok_btn.grid(row=0, column=2)
-
-        self.after(50, self._focus)
-        self.after(80, lambda: center_window(self, width, height))
 
     def _focus(self) -> None:
         try:
@@ -1936,5 +1931,14 @@ class FormDialog(ctk.CTkToplevel):
         raise NotImplementedError
 
     def show(self) -> Optional[dict]:
+        center_window(self, self._dialog_width, self._dialog_height)
+        self.deiconify()
+        self.grab_set()
+        self.lift()
+        self.after(50, self._focus)
+        self.after(
+            80,
+            lambda: center_window(self, self._dialog_width, self._dialog_height),
+        )
         self.wait_window()
         return self.result

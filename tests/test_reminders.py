@@ -29,6 +29,7 @@ class ReminderServiceTests(unittest.TestCase):
         self.project_id = self.services.projects.create("测试项目")  # type: ignore[union-attr]
         self.room_id = self.services.rooms.create(self.project_id, "A101", 50)  # type: ignore[union-attr]
         self.lease_id = self.services.leases.create(  # type: ignore[union-attr]
+            tenant="测试租赁方",
             room_id=self.room_id,
             deposit=2000,
             monthly_rent=3000,
@@ -72,6 +73,7 @@ class ReminderServiceTests(unittest.TestCase):
     def test_partial_month_prorates_gross_by_days(self) -> None:
         """租期未覆盖完整租赁月时，应缴按天比例折算。"""
         lease_id = self.services.leases.create(  # type: ignore[union-attr]
+            tenant="测试租赁方",
             room_id=self.room_id,
             deposit=1000,
             monthly_rent=3100,
@@ -96,6 +98,7 @@ class ReminderServiceTests(unittest.TestCase):
     def test_reject_overlapping_free_periods(self) -> None:
         with self.assertRaises(ValidationError):
             self.services.leases.create(  # type: ignore[union-attr]
+                tenant="测试租赁方",
                 room_id=self.room_id,
                 deposit=1000,
                 monthly_rent=2000,
@@ -190,6 +193,86 @@ class ReminderServiceTests(unittest.TestCase):
                 paid_at=date(2026, 2, 20),
             )
 
+    def test_one_payment_covers_consecutive_periods(self) -> None:
+        """一笔缴费可覆盖连续多个应收期，按时间顺序填满各期应缴。"""
+        lease = self.services.leases.get(self.lease_id)  # type: ignore[union-attr]
+        assert lease is not None
+        unpaid = self.services.reminders.unpaid_periods(lease, today=date(2026, 5, 1))  # type: ignore[union-attr]
+        first = next(p for p in unpaid if p.period_start == date(2026, 1, 15))
+        second = next(p for p in unpaid if p.period_start == date(2026, 4, 15))
+        total = round(first.amount + second.amount, 2)
+        self.services.payments.create(  # type: ignore[union-attr]
+            lease_id=self.lease_id,
+            period_start=first.period_start,
+            period_end=second.period_end,
+            amount=total,
+            paid_at=date(2026, 4, 20),
+        )
+        unpaid_after = self.services.reminders.unpaid_periods(  # type: ignore[union-attr]
+            lease, today=date(2026, 5, 1)
+        )
+        self.assertFalse(
+            any(p.period_start == date(2026, 1, 15) for p in unpaid_after)
+        )
+        self.assertFalse(
+            any(p.period_start == date(2026, 4, 15) for p in unpaid_after)
+        )
+        self.assertEqual(
+            self.services.reminders.paid_amount_for_period(self.lease_id, first),  # type: ignore[union-attr]
+            first.amount,
+        )
+        self.assertEqual(
+            self.services.reminders.paid_amount_for_period(self.lease_id, second),  # type: ignore[union-attr]
+            second.amount,
+        )
+
+    def test_multi_period_payment_fifo_partial(self) -> None:
+        """跨期缴费先填满首期，剩余再进入下一期。"""
+        lease = self.services.leases.get(self.lease_id)  # type: ignore[union-attr]
+        assert lease is not None
+        unpaid = self.services.reminders.unpaid_periods(lease, today=date(2026, 5, 1))  # type: ignore[union-attr]
+        first = next(p for p in unpaid if p.period_start == date(2026, 1, 15))
+        second = next(p for p in unpaid if p.period_start == date(2026, 4, 15))
+        # 首期剩余 6000，多缴 1000 进入第二期
+        self.services.payments.create(  # type: ignore[union-attr]
+            lease_id=self.lease_id,
+            period_start=first.period_start,
+            period_end=second.period_end,
+            amount=first.amount + 1000,
+            paid_at=date(2026, 4, 20),
+        )
+        self.assertEqual(
+            self.services.reminders.paid_amount_for_period(self.lease_id, first),  # type: ignore[union-attr]
+            first.amount,
+        )
+        self.assertEqual(
+            self.services.reminders.paid_amount_for_period(self.lease_id, second),  # type: ignore[union-attr]
+            1000,
+        )
+        unpaid_after = self.services.reminders.unpaid_periods(  # type: ignore[union-attr]
+            lease, today=date(2026, 5, 1)
+        )
+        remaining_second = next(
+            p for p in unpaid_after if p.period_start == date(2026, 4, 15)
+        )
+        self.assertEqual(remaining_second.amount, round(second.amount - 1000, 2))
+
+    def test_multi_period_payment_cap(self) -> None:
+        lease = self.services.leases.get(self.lease_id)  # type: ignore[union-attr]
+        assert lease is not None
+        unpaid = self.services.reminders.unpaid_periods(lease, today=date(2026, 5, 1))  # type: ignore[union-attr]
+        first = next(p for p in unpaid if p.period_start == date(2026, 1, 15))
+        second = next(p for p in unpaid if p.period_start == date(2026, 4, 15))
+        total = round(first.amount + second.amount, 2)
+        with self.assertRaises(ValidationError):
+            self.services.payments.create(  # type: ignore[union-attr]
+                lease_id=self.lease_id,
+                period_start=first.period_start,
+                period_end=second.period_end,
+                amount=total + 0.01,
+                paid_at=date(2026, 4, 20),
+            )
+
     def test_due_reminder_appears(self) -> None:
         # 首个季度起日 2026-01-15，提前 7 天提醒窗口内
         reminders = self.services.reminders.list_reminders(today=date(2026, 1, 10))  # type: ignore[union-attr]
@@ -203,9 +286,11 @@ class ReminderServiceTests(unittest.TestCase):
                 for r in rent_items
             )
         )
+        self.assertTrue(all(r.tenant == "测试租赁方" for r in reminders))
 
     def test_half_year_payment_period(self) -> None:
         lease_id = self.services.leases.create(  # type: ignore[union-attr]
+            tenant="测试租赁方",
             room_id=self.room_id,
             deposit=1000,
             monthly_rent=2000,
@@ -227,6 +312,7 @@ class ReminderServiceTests(unittest.TestCase):
 
     def test_discount_rate_and_amount_per_month(self) -> None:
         lease_id = self.services.leases.create(  # type: ignore[union-attr]
+            tenant="测试租赁方",
             room_id=self.room_id,
             deposit=1000,
             monthly_rent=3000,
@@ -280,6 +366,7 @@ class ReminderServiceTests(unittest.TestCase):
         self.assertEqual(months[0], (date(2036, 8, 10), date(2036, 9, 9)))
 
         lease_id = self.services.leases.create(  # type: ignore[union-attr]
+            tenant="测试租赁方",
             room_id=self.room_id,
             deposit=1000,
             monthly_rent=3000,
@@ -300,6 +387,7 @@ class ReminderServiceTests(unittest.TestCase):
         # 自然月起止不符合租赁月周期，应拒绝
         with self.assertRaises(ValidationError):
             self.services.leases.create(  # type: ignore[union-attr]
+                tenant="测试租赁方",
                 room_id=self.room_id,
                 deposit=1000,
                 monthly_rent=3000,
@@ -312,6 +400,7 @@ class ReminderServiceTests(unittest.TestCase):
 
     def test_free_period_takes_priority_over_discount(self) -> None:
         lease_id = self.services.leases.create(  # type: ignore[union-attr]
+            tenant="测试租赁方",
             room_id=self.room_id,
             deposit=1000,
             monthly_rent=3000,
@@ -333,6 +422,7 @@ class ReminderServiceTests(unittest.TestCase):
     def test_partial_free_days_prorate_amount(self) -> None:
         """免租费用按计费月与免租期重叠天数比例计算。"""
         lease_id = self.services.leases.create(  # type: ignore[union-attr]
+            tenant="测试租赁方",
             room_id=self.room_id,
             deposit=1000,
             monthly_rent=3000,
@@ -355,6 +445,7 @@ class ReminderServiceTests(unittest.TestCase):
     def test_discount_amount_based_on_monthly_rent(self) -> None:
         """立减按月租计算；部分免租时免租作用在折后金额上。"""
         lease_id = self.services.leases.create(  # type: ignore[union-attr]
+            tenant="测试租赁方",
             room_id=self.room_id,
             deposit=1000,
             monthly_rent=2000,
@@ -384,6 +475,7 @@ class ReminderServiceTests(unittest.TestCase):
     def test_reject_discount_amount_over_monthly_rent(self) -> None:
         with self.assertRaises(ValidationError) as ctx:
             self.services.leases.create(  # type: ignore[union-attr]
+                tenant="测试租赁方",
                 room_id=self.room_id,
                 deposit=1000,
                 monthly_rent=2000,
@@ -401,6 +493,7 @@ class ReminderServiceTests(unittest.TestCase):
         cap = round(2000 * 9 / 31, 2)
         with self.assertRaises(ValidationError) as ctx:
             self.services.leases.create(  # type: ignore[union-attr]
+                tenant="测试租赁方",
                 room_id=self.room_id,
                 deposit=1000,
                 monthly_rent=2000,
@@ -414,6 +507,7 @@ class ReminderServiceTests(unittest.TestCase):
 
         # 等于折算应缴可通过
         lease_id = self.services.leases.create(  # type: ignore[union-attr]
+            tenant="测试租赁方",
             room_id=self.room_id,
             deposit=1000,
             monthly_rent=2000,
@@ -427,6 +521,7 @@ class ReminderServiceTests(unittest.TestCase):
     def test_reject_invalid_discount_rate(self) -> None:
         with self.assertRaises(ValidationError):
             self.services.leases.create(  # type: ignore[union-attr]
+                tenant="测试租赁方",
                 room_id=self.room_id,
                 deposit=1000,
                 monthly_rent=2000,
@@ -439,6 +534,7 @@ class ReminderServiceTests(unittest.TestCase):
     def test_reject_overlapping_discounts(self) -> None:
         with self.assertRaises(ValidationError):
             self.services.leases.create(  # type: ignore[union-attr]
+                tenant="测试租赁方",
                 room_id=self.room_id,
                 deposit=1000,
                 monthly_rent=2000,
@@ -454,6 +550,7 @@ class ReminderServiceTests(unittest.TestCase):
     def test_reject_cross_month_discount(self) -> None:
         with self.assertRaises(ValidationError):
             self.services.leases.create(  # type: ignore[union-attr]
+                tenant="测试租赁方",
                 room_id=self.room_id,
                 deposit=1000,
                 monthly_rent=2000,

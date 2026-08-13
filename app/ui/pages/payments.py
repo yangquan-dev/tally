@@ -32,11 +32,11 @@ class PaymentFormDialog(FormDialog):
         lock_lease: bool = False,
         exclude_payment_id: int | None = None,
     ) -> None:
-        super().__init__(master, title, width=760, height=480)
+        super().__init__(master, title, width=760, height=520)
         self.services = services
         self.leases = leases
         self.exclude_payment_id = exclude_payment_id
-        self._due_amount = 0.0  # 剩余应缴（当次缴纳上限）
+        self._due_amount = 0.0  # 所选连续周期剩余应缴合计（当次缴纳上限）
         self._period_start: date | None = None
         self._period_end: date | None = None
         initial = initial or {}
@@ -49,7 +49,8 @@ class PaymentFormDialog(FormDialog):
         self.period_choices: list[
             tuple[str, date, date, float, float, float, float, float]
         ] = []
-        self.period_var = ctk.StringVar(value="")
+        self.start_period_var = ctk.StringVar(value="")
+        self.end_period_var = ctk.StringVar(value="")
         self.term_var = ctk.StringVar(value="—")
         self._summary_prefix_var = ctk.StringVar(value="剩余应缴")
         self._summary_remaining_var = ctk.StringVar(value="(—)")
@@ -76,13 +77,21 @@ class PaymentFormDialog(FormDialog):
             lease_widget.configure(state="disabled")
         self.add_field(0, "租赁合同", lease_widget)
 
-        self.period_menu = ctk.CTkOptionMenu(
+        self.start_period_menu = ctk.CTkOptionMenu(
             self.body,
             values=["暂无未缴应收期"],
-            variable=self.period_var,
-            command=self._on_period_selected,
+            variable=self.start_period_var,
+            command=self._on_start_period_selected,
         )
-        self.add_field(1, "未缴应收期", self.period_menu)
+        self.add_field(1, "起始应收期", self.start_period_menu)
+
+        self.end_period_menu = ctk.CTkOptionMenu(
+            self.body,
+            values=["暂无未缴应收期"],
+            variable=self.end_period_var,
+            command=self._on_end_period_selected,
+        )
+        self.add_field(2, "结束应收期", self.end_period_menu)
 
         readonly_color = "#374151"
         self.term_label = ctk.CTkLabel(
@@ -111,12 +120,12 @@ class PaymentFormDialog(FormDialog):
         self._summary_prefix_label.pack(side="left")
         self._summary_remaining_label.pack(side="left")
         self._summary_suffix_label.pack(side="left", fill="x", expand=True)
-        self.add_field(2, "缴费起止", self.term_label)
-        self.add_field(3, "费用明细", summary_box)
-        self.add_field(4, "当次缴纳", ctk.CTkEntry(self.body, textvariable=self.amount_var))
+        self.add_field(3, "缴费起止", self.term_label)
+        self.add_field(4, "费用明细", summary_box)
+        self.add_field(5, "当次缴纳", ctk.CTkEntry(self.body, textvariable=self.amount_var))
         self.paid_at_picker = DatePickerField(self.body, textvariable=self.paid_at_var)
-        self.add_field(5, "实缴日期", self.paid_at_picker)
-        self.add_field(6, "备注", ctk.CTkEntry(self.body, textvariable=self.note_var))
+        self.add_field(6, "实缴日期", self.paid_at_picker)
+        self.add_field(7, "备注", ctk.CTkEntry(self.body, textvariable=self.note_var))
 
         self.after(80, self._reload_periods)
 
@@ -125,8 +134,8 @@ class PaymentFormDialog(FormDialog):
         due: float, paid: float, free: float, discount: float, remaining: float
     ) -> str:
         return (
-            f"剩余应缴({remaining:g})=应缴({due:g})-已缴({paid:g})-"
-            f"免租({free:g})-折/减({discount:g})"
+            f"剩余应缴({remaining:.2f})=应缴({due:.2f})-已缴({paid:.2f})-"
+            f"免租({free:.2f})-折/减({discount:.2f})"
         )
 
     def _set_amount_summary(
@@ -136,12 +145,19 @@ class PaymentFormDialog(FormDialog):
         free: float,
         discount: float,
         remaining: float,
+        *,
+        period_count: int = 1,
     ) -> None:
+        due = round(float(due), 2)
+        paid = round(float(paid), 2)
+        free = round(float(free), 2)
+        discount = round(float(discount), 2)
         remaining = round(float(remaining), 2)
-        self._summary_prefix_var.set("剩余应缴")
-        self._summary_remaining_var.set(f"({remaining:g})")
+        prefix = "剩余应缴" if period_count <= 1 else f"剩余应缴合计({period_count}期)"
+        self._summary_prefix_var.set(prefix)
+        self._summary_remaining_var.set(f"({remaining:.2f})")
         self._summary_suffix_var.set(
-            f"=应缴({due:g})-已缴({paid:g})-免租({free:g})-折/减({discount:g})"
+            f"=应缴({due:.2f})-已缴({paid:.2f})-免租({free:.2f})-折/减({discount:.2f})"
         )
         self._summary_remaining_label.configure(
             text_color="#b91c1c" if remaining > 0 else "#374151"
@@ -159,23 +175,49 @@ class PaymentFormDialog(FormDialog):
             return None
         return self.services.leases.get(lease_id)
 
-    def _apply_period(
+    def _choice_by_label(self, label: str):
+        for item in self.period_choices:
+            if item[0] == label:
+                return item
+        return None
+
+    def _index_of_choice(self, label: str) -> int:
+        for idx, item in enumerate(self.period_choices):
+            if item[0] == label:
+                return idx
+        return -1
+
+    def _apply_range(
         self,
-        start: date,
-        end: date,
-        due: float,
-        paid: float,
-        free: float,
-        discount: float,
-        remaining: float,
+        start_idx: int,
+        end_idx: int,
         *,
         sync_amount: bool = True,
     ) -> None:
+        if start_idx < 0 or end_idx < start_idx or end_idx >= len(self.period_choices):
+            self._clear_period()
+            return
+        selected = self.period_choices[start_idx : end_idx + 1]
+        start = selected[0][1]
+        end = selected[-1][2]
+        due = round(sum(item[3] for item in selected), 2)
+        paid = round(sum(item[4] for item in selected), 2)
+        free = round(sum(item[5] for item in selected), 2)
+        discount = round(sum(item[6] for item in selected), 2)
+        remaining = round(sum(item[7] for item in selected), 2)
         self._period_start = start
         self._period_end = end
-        self._due_amount = round(float(remaining), 2)
-        self.term_var.set(format_date_range(start, end))
-        self._set_amount_summary(due, paid, free, discount, remaining)
+        self._due_amount = remaining
+        count = len(selected)
+        if count == 1:
+            self.term_var.set(format_date_range(start, end))
+        else:
+            self.term_var.set(
+                f"{format_date_range(start, end)}（连续 {count} 个应收期）"
+            )
+        self._set_amount_summary(
+            due, paid, free, discount, remaining, period_count=count
+        )
         if sync_amount:
             if self._keep_initial_amount:
                 self._keep_initial_amount = False
@@ -196,6 +238,24 @@ class PaymentFormDialog(FormDialog):
         if not self._keep_initial_amount:
             self.amount_var.set("")
 
+    def _refresh_end_menu(self, start_idx: int, preferred_end_idx: int | None = None) -> None:
+        if start_idx < 0 or start_idx >= len(self.period_choices):
+            self.end_period_menu.configure(
+                state="disabled", values=["暂无未缴应收期"]
+            )
+            self.end_period_var.set("暂无未缴应收期")
+            return
+        end_choices = [item[0] for item in self.period_choices[start_idx:]]
+        self.end_period_menu.configure(state="normal", values=end_choices)
+        if preferred_end_idx is not None and preferred_end_idx >= start_idx:
+            end_idx = preferred_end_idx
+        else:
+            current = self.end_period_var.get()
+            end_idx = self._index_of_choice(current)
+            if end_idx < start_idx:
+                end_idx = start_idx
+        self.end_period_var.set(self.period_choices[end_idx][0])
+
     def _reload_periods(self) -> None:
         lease_id = self._current_lease_id()
         choices: list[str] = []
@@ -206,7 +266,6 @@ class PaymentFormDialog(FormDialog):
                 for period in self.services.reminders.generate_rent_periods(lease):
                     if period.fully_free or period.amount <= 0:
                         continue
-                    # 应缴=未免租未折减；剩余=应缴-已缴-免租-折/减
                     due = self.services.reminders.period_gross_amount(lease, period)
                     free = self.services.reminders.period_free_amount(lease, period)
                     discount = self.services.reminders.period_discount_amount(
@@ -242,14 +301,21 @@ class PaymentFormDialog(FormDialog):
                     )
 
         if not choices:
-            self.period_menu.configure(values=["暂无未缴应收期"])
-            self.period_var.set("暂无未缴应收期")
-            self.period_menu.configure(state="disabled")
+            self.start_period_menu.configure(
+                state="disabled", values=["暂无未缴应收期"]
+            )
+            self.end_period_menu.configure(
+                state="disabled", values=["暂无未缴应收期"]
+            )
+            self.start_period_var.set("暂无未缴应收期")
+            self.end_period_var.set("暂无未缴应收期")
             self._clear_period()
             return
 
-        self.period_menu.configure(state="normal", values=choices)
-        matched = None
+        self.start_period_menu.configure(state="normal", values=choices)
+
+        start_idx = 0
+        end_idx = 0
         if self._initial_start and self._initial_end:
             try:
                 start = date.fromisoformat(self._initial_start)
@@ -257,44 +323,55 @@ class PaymentFormDialog(FormDialog):
             except ValueError:
                 start = end = None  # type: ignore[assignment]
             if start and end:
-                for item in self.period_choices:
-                    label, p_start, p_end, due, paid, free, discount, remaining = item
-                    if p_start == start and p_end == end:
-                        matched = item
-                        break
+                for idx, item in enumerate(self.period_choices):
+                    _label, p_start, p_end, *_rest = item
+                    if p_start == start:
+                        start_idx = idx
+                    if p_end == end:
+                        end_idx = idx
+                if end_idx < start_idx:
+                    end_idx = start_idx
             self._initial_start = ""
             self._initial_end = ""
 
-        selected = matched or self.period_choices[0]
-        label, start, end, due, paid, free, discount, remaining = selected
         keep = self._keep_initial_amount
-        self.period_var.set(label)
-        self._apply_period(
-            start, end, due, paid, free, discount, remaining, sync_amount=not keep
-        )
+        self.start_period_var.set(self.period_choices[start_idx][0])
+        self._refresh_end_menu(start_idx, preferred_end_idx=end_idx)
+        self._apply_range(start_idx, self._index_of_choice(self.end_period_var.get()), sync_amount=not keep)
         if keep:
             self._keep_initial_amount = False
 
-    def _on_period_selected(self, value: str) -> None:
-        for label, start, end, due, paid, free, discount, remaining in self.period_choices:
-            if label == value:
-                self._apply_period(
-                    start, end, due, paid, free, discount, remaining, sync_amount=True
-                )
-                break
+    def _on_start_period_selected(self, value: str) -> None:
+        start_idx = self._index_of_choice(value)
+        self._refresh_end_menu(start_idx)
+        end_idx = self._index_of_choice(self.end_period_var.get())
+        self._apply_range(start_idx, end_idx, sync_amount=True)
+
+    def _on_end_period_selected(self, value: str) -> None:
+        start_idx = self._index_of_choice(self.start_period_var.get())
+        end_idx = self._index_of_choice(value)
+        if end_idx < start_idx:
+            end_idx = start_idx
+            if 0 <= start_idx < len(self.period_choices):
+                self.end_period_var.set(self.period_choices[start_idx][0])
+        self._apply_range(start_idx, end_idx, sync_amount=True)
 
     def collect(self) -> dict:
         lease_id = self._current_lease_id()
         if lease_id is None:
             raise ValueError("请先创建生效中的租赁")
         if self._period_start is None or self._period_end is None:
-            raise ValueError("请选择未缴应收期")
+            raise ValueError("请选择起止应收期")
         if self._due_amount <= 0:
-            raise ValueError("当前周期剩余应缴为 0，无需缴费")
+            raise ValueError("所选周期剩余应缴为 0，无需缴费")
+        start_idx = self._index_of_choice(self.start_period_var.get())
+        end_idx = self._index_of_choice(self.end_period_var.get())
+        if start_idx < 0 or end_idx < start_idx:
+            raise ValueError("结束应收期不能早于起始应收期")
         amount = parse_float(self.amount_var.get(), "当次缴纳")
         if amount <= 0 or amount > self._due_amount + 0.009:
             raise ValueError(
-                f"当次缴纳须大于 0 且不超过剩余应缴 ¥{self._due_amount:.2f}"
+                f"当次缴纳须大于 0 且不超过剩余应缴合计 ¥{self._due_amount:.2f}"
             )
         amount = min(amount, self._due_amount)
         return {
@@ -332,7 +409,8 @@ class PaymentsPage(ctk.CTkFrame):
             values=["全部项目"],
             variable=self.project_var,
             command=self._on_project_filter_changed,
-            width=160,
+            width=120,
+            dynamic_resizing=False,
         )
         self.project_menu.pack(side="left")
         ctk.CTkLabel(filter_box, text="房间号", text_color="#6b7280").pack(
@@ -345,6 +423,7 @@ class PaymentsPage(ctk.CTkFrame):
             variable=self.room_var,
             command=lambda _v: self.refresh(),
             width=120,
+            dynamic_resizing=False,
         )
         self.room_menu.pack(side="left")
 
@@ -409,7 +488,11 @@ class PaymentsPage(ctk.CTkFrame):
         return [
             (
                 lease.id,
-                f"{lease.project_name} / {lease.room_no} ({lease.start_date}~{lease.end_date})",
+                (
+                    f"{lease.project_name} / {lease.room_no}"
+                    + (f" / {lease.tenant}" if lease.tenant else "")
+                    + f" ({lease.start_date}~{lease.end_date})"
+                ),
             )
             for lease in leases
         ]
@@ -476,6 +559,21 @@ class PaymentsPage(ctk.CTkFrame):
             payments = [p for p in payments if p.room_no == room_no]
         return payments
 
+    def _payment_period_label(self, payment) -> str:
+        """多应收期时按行展示各周期；单期仍为一行区间。"""
+        if self.services.leases is None or self.services.reminders is None:
+            return format_date_range(payment.period_start, payment.period_end)
+        lease = self.services.leases.get(payment.lease_id)
+        if not lease:
+            return format_date_range(payment.period_start, payment.period_end)
+        covered = self.services.reminders.covered_rent_periods(lease, payment)
+        if not covered:
+            return format_date_range(payment.period_start, payment.period_end)
+        return "\n".join(
+            format_date_range(period.period_start, period.period_end)
+            for period in covered
+        )
+
     def refresh(self) -> None:
         if not self.services.is_ready or self.services.payments is None:
             return
@@ -488,7 +586,7 @@ class PaymentsPage(ctk.CTkFrame):
                     p.id,
                     p.project_name,
                     p.room_no,
-                    format_date_range(p.period_start, p.period_end),
+                    self._payment_period_label(p),
                     format_money(p.amount),
                     p.paid_at.isoformat(),
                     self._format_registered_at(p.updated_at or p.created_at),
@@ -576,7 +674,11 @@ class PaymentsPage(ctk.CTkFrame):
         leases = [
             (
                 lease.id,
-                f"{lease.project_name} / {lease.room_no} ({lease.start_date}~{lease.end_date})",
+                (
+                    f"{lease.project_name} / {lease.room_no}"
+                    + (f" / {lease.tenant}" if lease.tenant else "")
+                    + f" ({lease.start_date}~{lease.end_date})"
+                ),
             )
         ]
         data = PaymentFormDialog(

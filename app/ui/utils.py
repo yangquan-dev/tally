@@ -257,6 +257,24 @@ def format_money(value: float) -> str:
     return f"{value:,.2f}".replace(",", "\u202f")
 
 
+def format_remaining_due_formula(
+    remaining: float,
+    due: float,
+    paid: float,
+    free: float = 0.0,
+    discount: float = 0.0,
+    *,
+    with_prefix: bool = True,
+) -> str:
+    """剩余应缴公式；金额两位小数；免租/折减仅当金额 > 0 时展示。"""
+    body = f"({remaining:.2f})=应缴({due:.2f})-已缴({paid:.2f})"
+    if free > 0:
+        body += f"-免租({free:.2f})"
+    if discount > 0:
+        body += f"-折/减({discount:.2f})"
+    return f"剩余应缴{body}" if with_prefix else body
+
+
 def format_dt(value: object) -> str:
     if value is None:
         return ""

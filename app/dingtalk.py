@@ -19,6 +19,7 @@ from datetime import date, datetime
 from typing import Iterable, Optional, Sequence
 
 from app.models import ReminderItem
+from app.ui.utils import format_remaining_due_formula
 
 # 钉钉 markdown 正文不宜过长
 _MAX_ITEMS = 40
@@ -163,9 +164,14 @@ def format_reminders_markdown(
                 lines.append(f"- 月租 {_money_text(item.amount)}")
             else:
                 lines.append(
-                    f"- 剩余应缴({item.amount:g})=应缴({item.due_amount:g})-"
-                    f"已缴({item.paid_amount:g})-免租({item.free_amount:g})-"
-                    f"折/减({item.discount_amount:g})"
+                    "- "
+                    + format_remaining_due_formula(
+                        item.amount,
+                        item.due_amount,
+                        item.paid_amount,
+                        item.free_amount,
+                        item.discount_amount,
+                    )
                 )
             if period:
                 lines.append(f"- 周期 {period}")

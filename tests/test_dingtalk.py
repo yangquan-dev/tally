@@ -149,9 +149,15 @@ class DingTalkHelpersTests(unittest.TestCase):
         self.assertIn("一号院 · 101", text)
         self.assertIn("逾期 2 天", text)
         self.assertIn(
-            "剩余应缴(3000)=应缴(6000)-已缴(2000)-免租(500)-折/减(500)",
+            "剩余应缴(3000.00)=应缴(6000.00)-已缴(2000.00)-免租(500.00)-折/减(500.00)",
             text,
         )
+        self.assertIn(
+            "剩余应缴(2800.00)=应缴(2800.00)-已缴(0.00)",
+            text,
+        )
+        self.assertNotIn("免租(0.00)", text)
+        self.assertNotIn("折/减(0.00)", text)
         self.assertIn("应收提醒", text)
 
     def test_format_empty(self) -> None:
