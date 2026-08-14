@@ -480,44 +480,58 @@ class PaymentRepository:
     def __init__(self, db: Database) -> None:
         self.db = db
 
-    def list_all(self, project_id: Optional[int] = None) -> list[Payment]:
+    def list_all(
+        self,
+        project_id: Optional[int] = None,
+        fee_type: Optional[str] = None,
+    ) -> list[Payment]:
         sql = """
-            SELECT pay.*, r.room_no, r.project_id, p.name AS project_name
+            SELECT pay.*, r.room_no, r.project_id, p.name AS project_name, l.tenant
             FROM payments pay
             JOIN leases l ON l.id = pay.lease_id
             JOIN rooms r ON r.id = l.room_id
             JOIN projects p ON p.id = r.project_id
         """
-        params: tuple = ()
+        clauses: list[str] = []
+        params: list = []
         if project_id is not None:
-            sql += " WHERE r.project_id = ?"
-            params = (project_id,)
+            clauses.append("r.project_id = ?")
+            params.append(project_id)
+        if fee_type is not None:
+            clauses.append("pay.fee_type = ?")
+            params.append(fee_type)
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
         sql += " ORDER BY pay.period_start DESC, pay.id DESC"
         with self.db.connect() as conn:
-            rows = conn.execute(sql, params).fetchall()
+            rows = conn.execute(sql, tuple(params)).fetchall()
         return [Payment.from_row(r) for r in rows]
 
-    def list_by_lease(self, lease_id: int) -> list[Payment]:
+    def list_by_lease(
+        self, lease_id: int, fee_type: Optional[str] = None
+    ) -> list[Payment]:
+        sql = """
+            SELECT pay.*, r.room_no, r.project_id, p.name AS project_name, l.tenant
+            FROM payments pay
+            JOIN leases l ON l.id = pay.lease_id
+            JOIN rooms r ON r.id = l.room_id
+            JOIN projects p ON p.id = r.project_id
+            WHERE pay.lease_id = ?
+        """
+        params: list = [lease_id]
+        if fee_type is not None:
+            sql += " AND pay.fee_type = ?"
+            params.append(fee_type)
+        sql += " ORDER BY pay.period_start DESC"
         with self.db.connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT pay.*, r.room_no, r.project_id, p.name AS project_name
-                FROM payments pay
-                JOIN leases l ON l.id = pay.lease_id
-                JOIN rooms r ON r.id = l.room_id
-                JOIN projects p ON p.id = r.project_id
-                WHERE pay.lease_id = ?
-                ORDER BY pay.period_start DESC
-                """,
-                (lease_id,),
-            ).fetchall()
+            rows = conn.execute(sql, tuple(params)).fetchall()
         return [Payment.from_row(r) for r in rows]
 
     def get(self, payment_id: int) -> Optional[Payment]:
         with self.db.connect() as conn:
             row = conn.execute(
                 """
-                SELECT pay.*, r.room_no, r.project_id, p.name AS project_name
+                SELECT pay.*, r.room_no, r.project_id, p.name AS project_name, l.tenant
                 FROM payments pay
                 JOIN leases l ON l.id = pay.lease_id
                 JOIN rooms r ON r.id = l.room_id
@@ -536,16 +550,18 @@ class PaymentRepository:
         amount: float,
         paid_at: date,
         note: str = "",
+        fee_type: str = "租金",
     ) -> int:
         with self.db.connect() as conn:
             cur = conn.execute(
                 """
                 INSERT INTO payments (
-                    lease_id, period_start, period_end, amount, paid_at, note
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                    lease_id, fee_type, period_start, period_end, amount, paid_at, note
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     lease_id,
+                    fee_type,
                     period_start.isoformat(),
                     period_end.isoformat(),
                     amount,
@@ -563,24 +579,45 @@ class PaymentRepository:
         amount: float,
         paid_at: date,
         note: str,
+        fee_type: str | None = None,
     ) -> None:
         with self.db.connect() as conn:
-            conn.execute(
-                """
-                UPDATE payments
-                SET period_start = ?, period_end = ?, amount = ?, paid_at = ?, note = ?,
-                    updated_at = datetime('now', 'localtime')
-                WHERE id = ?
-                """,
-                (
-                    period_start.isoformat(),
-                    period_end.isoformat(),
-                    amount,
-                    paid_at.isoformat(),
-                    note,
-                    payment_id,
-                ),
-            )
+            if fee_type is None:
+                conn.execute(
+                    """
+                    UPDATE payments
+                    SET period_start = ?, period_end = ?, amount = ?, paid_at = ?, note = ?,
+                        updated_at = datetime('now', 'localtime')
+                    WHERE id = ?
+                    """,
+                    (
+                        period_start.isoformat(),
+                        period_end.isoformat(),
+                        amount,
+                        paid_at.isoformat(),
+                        note,
+                        payment_id,
+                    ),
+                )
+            else:
+                conn.execute(
+                    """
+                    UPDATE payments
+                    SET fee_type = ?, period_start = ?, period_end = ?, amount = ?,
+                        paid_at = ?, note = ?,
+                        updated_at = datetime('now', 'localtime')
+                    WHERE id = ?
+                    """,
+                    (
+                        fee_type,
+                        period_start.isoformat(),
+                        period_end.isoformat(),
+                        amount,
+                        paid_at.isoformat(),
+                        note,
+                        payment_id,
+                    ),
+                )
 
     def delete(self, payment_id: int) -> None:
         with self.db.connect() as conn:

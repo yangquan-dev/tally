@@ -29,7 +29,7 @@ class ReminderServiceTests(unittest.TestCase):
         self.project_id = self.services.projects.create("测试项目")  # type: ignore[union-attr]
         self.room_id = self.services.rooms.create(self.project_id, "A101", 50)  # type: ignore[union-attr]
         self.lease_id = self.services.leases.create(  # type: ignore[union-attr]
-            tenant="测试租赁方",
+            tenant="测试租户",
             room_id=self.room_id,
             deposit=2000,
             monthly_rent=3000,
@@ -73,7 +73,7 @@ class ReminderServiceTests(unittest.TestCase):
     def test_partial_month_prorates_gross_by_days(self) -> None:
         """租期未覆盖完整租赁月时，应缴按天比例折算。"""
         lease_id = self.services.leases.create(  # type: ignore[union-attr]
-            tenant="测试租赁方",
+            tenant="测试租户",
             room_id=self.room_id,
             deposit=1000,
             monthly_rent=3100,
@@ -98,7 +98,7 @@ class ReminderServiceTests(unittest.TestCase):
     def test_reject_overlapping_free_periods(self) -> None:
         with self.assertRaises(ValidationError):
             self.services.leases.create(  # type: ignore[union-attr]
-                tenant="测试租赁方",
+                tenant="测试租户",
                 room_id=self.room_id,
                 deposit=1000,
                 monthly_rent=2000,
@@ -156,7 +156,7 @@ class ReminderServiceTests(unittest.TestCase):
             for r in reminders
             if r.lease_id == self.lease_id
             and r.period_start == date(2026, 1, 15)
-            and r.kind in {"已逾期", "应收提醒"}
+            and r.kind in {"租金逾期", "租金应收"}
         )
         self.assertEqual(hit.amount, 4000)
         self.assertEqual(hit.due_amount, 9000)
@@ -277,8 +277,8 @@ class ReminderServiceTests(unittest.TestCase):
         # 首个季度起日 2026-01-15，提前 7 天提醒窗口内
         reminders = self.services.reminders.list_reminders(today=date(2026, 1, 10))  # type: ignore[union-attr]
         kinds = {r.kind for r in reminders}
-        self.assertIn("应收提醒", kinds)
-        rent_items = [r for r in reminders if r.kind == "应收提醒"]
+        self.assertIn("租金应收", kinds)
+        rent_items = [r for r in reminders if r.kind == "租金应收"]
         self.assertTrue(
             any(
                 r.period_start == date(2026, 1, 15)
@@ -286,11 +286,11 @@ class ReminderServiceTests(unittest.TestCase):
                 for r in rent_items
             )
         )
-        self.assertTrue(all(r.tenant == "测试租赁方" for r in reminders))
+        self.assertTrue(all(r.tenant == "测试租户" for r in reminders))
 
     def test_half_year_payment_period(self) -> None:
         lease_id = self.services.leases.create(  # type: ignore[union-attr]
-            tenant="测试租赁方",
+            tenant="测试租户",
             room_id=self.room_id,
             deposit=1000,
             monthly_rent=2000,
@@ -312,7 +312,7 @@ class ReminderServiceTests(unittest.TestCase):
 
     def test_discount_rate_and_amount_per_month(self) -> None:
         lease_id = self.services.leases.create(  # type: ignore[union-attr]
-            tenant="测试租赁方",
+            tenant="测试租户",
             room_id=self.room_id,
             deposit=1000,
             monthly_rent=3000,
@@ -366,7 +366,7 @@ class ReminderServiceTests(unittest.TestCase):
         self.assertEqual(months[0], (date(2036, 8, 10), date(2036, 9, 9)))
 
         lease_id = self.services.leases.create(  # type: ignore[union-attr]
-            tenant="测试租赁方",
+            tenant="测试租户",
             room_id=self.room_id,
             deposit=1000,
             monthly_rent=3000,
@@ -387,7 +387,7 @@ class ReminderServiceTests(unittest.TestCase):
         # 自然月起止不符合租赁月周期，应拒绝
         with self.assertRaises(ValidationError):
             self.services.leases.create(  # type: ignore[union-attr]
-                tenant="测试租赁方",
+                tenant="测试租户",
                 room_id=self.room_id,
                 deposit=1000,
                 monthly_rent=3000,
@@ -400,7 +400,7 @@ class ReminderServiceTests(unittest.TestCase):
 
     def test_free_period_takes_priority_over_discount(self) -> None:
         lease_id = self.services.leases.create(  # type: ignore[union-attr]
-            tenant="测试租赁方",
+            tenant="测试租户",
             room_id=self.room_id,
             deposit=1000,
             monthly_rent=3000,
@@ -422,7 +422,7 @@ class ReminderServiceTests(unittest.TestCase):
     def test_partial_free_days_prorate_amount(self) -> None:
         """免租费用按计费月与免租期重叠天数比例计算。"""
         lease_id = self.services.leases.create(  # type: ignore[union-attr]
-            tenant="测试租赁方",
+            tenant="测试租户",
             room_id=self.room_id,
             deposit=1000,
             monthly_rent=3000,
@@ -445,7 +445,7 @@ class ReminderServiceTests(unittest.TestCase):
     def test_discount_amount_based_on_monthly_rent(self) -> None:
         """立减按月租计算；部分免租时免租作用在折后金额上。"""
         lease_id = self.services.leases.create(  # type: ignore[union-attr]
-            tenant="测试租赁方",
+            tenant="测试租户",
             room_id=self.room_id,
             deposit=1000,
             monthly_rent=2000,
@@ -475,7 +475,7 @@ class ReminderServiceTests(unittest.TestCase):
     def test_reject_discount_amount_over_monthly_rent(self) -> None:
         with self.assertRaises(ValidationError) as ctx:
             self.services.leases.create(  # type: ignore[union-attr]
-                tenant="测试租赁方",
+                tenant="测试租户",
                 room_id=self.room_id,
                 deposit=1000,
                 monthly_rent=2000,
@@ -493,7 +493,7 @@ class ReminderServiceTests(unittest.TestCase):
         cap = round(2000 * 9 / 31, 2)
         with self.assertRaises(ValidationError) as ctx:
             self.services.leases.create(  # type: ignore[union-attr]
-                tenant="测试租赁方",
+                tenant="测试租户",
                 room_id=self.room_id,
                 deposit=1000,
                 monthly_rent=2000,
@@ -507,7 +507,7 @@ class ReminderServiceTests(unittest.TestCase):
 
         # 等于折算应缴可通过
         lease_id = self.services.leases.create(  # type: ignore[union-attr]
-            tenant="测试租赁方",
+            tenant="测试租户",
             room_id=self.room_id,
             deposit=1000,
             monthly_rent=2000,
@@ -521,7 +521,7 @@ class ReminderServiceTests(unittest.TestCase):
     def test_reject_invalid_discount_rate(self) -> None:
         with self.assertRaises(ValidationError):
             self.services.leases.create(  # type: ignore[union-attr]
-                tenant="测试租赁方",
+                tenant="测试租户",
                 room_id=self.room_id,
                 deposit=1000,
                 monthly_rent=2000,
@@ -534,7 +534,7 @@ class ReminderServiceTests(unittest.TestCase):
     def test_reject_overlapping_discounts(self) -> None:
         with self.assertRaises(ValidationError):
             self.services.leases.create(  # type: ignore[union-attr]
-                tenant="测试租赁方",
+                tenant="测试租户",
                 room_id=self.room_id,
                 deposit=1000,
                 monthly_rent=2000,
@@ -550,7 +550,7 @@ class ReminderServiceTests(unittest.TestCase):
     def test_reject_cross_month_discount(self) -> None:
         with self.assertRaises(ValidationError):
             self.services.leases.create(  # type: ignore[union-attr]
-                tenant="测试租赁方",
+                tenant="测试租户",
                 room_id=self.room_id,
                 deposit=1000,
                 monthly_rent=2000,
@@ -561,6 +561,97 @@ class ReminderServiceTests(unittest.TestCase):
                     (date(2033, 1, 1), date(2033, 2, 28), "rate", 0.9),
                 ],
             )
+
+    def test_deposit_payment_does_not_affect_rent(self) -> None:
+        from app.models import FEE_TYPE_DEPOSIT
+
+        lease = self.services.leases.get(self.lease_id)  # type: ignore[union-attr]
+        assert lease is not None
+        # setUp 租赁押金 2000
+        pay_id = self.services.payments.create(  # type: ignore[union-attr]
+            lease_id=self.lease_id,
+            period_start=date(2026, 1, 15),
+            period_end=date(2026, 1, 15),
+            amount=800,
+            paid_at=date(2026, 1, 20),
+            note="首笔押金",
+            fee_type=FEE_TYPE_DEPOSIT,
+        )
+        self.assertGreater(pay_id, 0)
+        self.assertEqual(
+            self.services.payments.deposit_paid(self.lease_id),  # type: ignore[union-attr]
+            800,
+        )
+        self.assertEqual(
+            self.services.payments.deposit_remaining(self.lease_id),  # type: ignore[union-attr]
+            1200,
+        )
+        # 押金不计入租金已缴
+        periods = self.services.reminders.generate_rent_periods(lease)  # type: ignore[union-attr]
+        chargeable = [p for p in periods if float(p.amount) > 0]
+        self.assertTrue(chargeable)
+        paid_map = self.services.reminders.paid_map_for_lease(lease)  # type: ignore[union-attr]
+        for period in chargeable:
+            key = (period.period_start, period.period_end)
+            self.assertEqual(paid_map.get(key, 0.0), 0.0)
+
+        with self.assertRaises(ValidationError):
+            self.services.payments.create(  # type: ignore[union-attr]
+                lease_id=self.lease_id,
+                period_start=date(2026, 1, 21),
+                period_end=date(2026, 1, 21),
+                amount=1200.01,
+                paid_at=date(2026, 1, 21),
+                fee_type=FEE_TYPE_DEPOSIT,
+            )
+
+    def test_deposit_unpaid_appears_in_reminders(self) -> None:
+        from app.models import FEE_TYPE_DEPOSIT
+
+        reminders = self.services.reminders.list_reminders(  # type: ignore[union-attr]
+            today=date(2026, 2, 1)
+        )
+        deposit_items = [
+            r for r in reminders if r.kind == "押金应收" and r.lease_id == self.lease_id
+        ]
+        self.assertEqual(len(deposit_items), 1)
+        self.assertEqual(deposit_items[0].amount, 2000)
+        self.assertEqual(deposit_items[0].due_amount, 2000)
+        self.assertEqual(deposit_items[0].paid_amount, 0)
+
+        self.services.payments.create(  # type: ignore[union-attr]
+            lease_id=self.lease_id,
+            period_start=date(2026, 1, 20),
+            period_end=date(2026, 1, 20),
+            amount=500,
+            paid_at=date(2026, 1, 20),
+            fee_type=FEE_TYPE_DEPOSIT,
+        )
+        reminders = self.services.reminders.list_reminders(  # type: ignore[union-attr]
+            today=date(2026, 2, 1)
+        )
+        deposit_items = [
+            r for r in reminders if r.kind == "押金应收" and r.lease_id == self.lease_id
+        ]
+        self.assertEqual(len(deposit_items), 1)
+        self.assertEqual(deposit_items[0].amount, 1500)
+        self.assertEqual(deposit_items[0].paid_amount, 500)
+
+        self.services.payments.create(  # type: ignore[union-attr]
+            lease_id=self.lease_id,
+            period_start=date(2026, 1, 21),
+            period_end=date(2026, 1, 21),
+            amount=1500,
+            paid_at=date(2026, 1, 21),
+            fee_type=FEE_TYPE_DEPOSIT,
+        )
+        reminders = self.services.reminders.list_reminders(  # type: ignore[union-attr]
+            today=date(2026, 2, 1)
+        )
+        deposit_items = [
+            r for r in reminders if r.kind == "押金应收" and r.lease_id == self.lease_id
+        ]
+        self.assertEqual(deposit_items, [])
 
 
 class BootstrapConfigTests(unittest.TestCase):

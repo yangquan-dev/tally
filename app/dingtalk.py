@@ -18,7 +18,14 @@ import urllib.request
 from datetime import date, datetime
 from typing import Iterable, Optional, Sequence
 
-from app.models import ReminderItem
+from app.models import (
+    REMINDER_KIND_CONTRACT_EXPIRED,
+    REMINDER_KIND_DEPOSIT,
+    REMINDER_KIND_ORDER,
+    REMINDER_KIND_RENT_DUE,
+    REMINDER_KIND_RENT_OVERDUE,
+    ReminderItem,
+)
 from app.ui.utils import format_remaining_due_formula
 
 # 钉钉 markdown 正文不宜过长
@@ -87,16 +94,12 @@ def _days_text(days_delta: int) -> str:
     return f"剩余 {days_delta} 天"
 
 
-def _money_text(amount: float) -> str:
-    return f"¥{amount:,.2f}"
-
-
 def _kind_emoji(kind: str) -> str:
     return {
-        "已逾期": "🔴",
-        "应收提醒": "🟠",
-        "合同已到期": "🟣",
-        "合同即将到期": "🔵",
+        REMINDER_KIND_DEPOSIT: "🟡",
+        REMINDER_KIND_RENT_OVERDUE: "🔴",
+        REMINDER_KIND_RENT_DUE: "🟠",
+        REMINDER_KIND_CONTRACT_EXPIRED: "🟣",
     }.get(kind, "▪️")
 
 
@@ -108,9 +111,10 @@ def format_reminders_markdown(
 ) -> tuple[str, str]:
     """组装钉钉 markdown 消息，返回 (title, text)。"""
     today = today or date.today()
-    overdue = sum(1 for i in items if i.kind == "已逾期")
-    due = sum(1 for i in items if i.kind == "应收提醒")
-    expire = sum(1 for i in items if i.kind in {"合同即将到期", "合同已到期"})
+    overdue = sum(1 for i in items if i.kind == REMINDER_KIND_RENT_OVERDUE)
+    due = sum(1 for i in items if i.kind == REMINDER_KIND_RENT_DUE)
+    deposit = sum(1 for i in items if i.kind == REMINDER_KIND_DEPOSIT)
+    expire = sum(1 for i in items if i.kind == REMINDER_KIND_CONTRACT_EXPIRED)
 
     title = f"{app_name}·提醒看板"
     heading = f"{app_name} · 提醒看板"
@@ -120,9 +124,10 @@ def format_reminders_markdown(
         f"**日期** {today.isoformat()}",
         "",
         f"**汇总** 共 {len(items)} 条",
-        f"- 🔴 已逾期：**{overdue}**",
-        f"- 🟠 应收提醒：**{due}**",
-        f"- 🔵 合同到期相关：**{expire}**",
+        f"- 🟡 押金应收：**{deposit}**",
+        f"- 🔴 租金逾期：**{overdue}**",
+        f"- 🟠 租金应收：**{due}**",
+        f"- 🟣 合同到期：**{expire}**",
         "",
     ]
 
@@ -132,7 +137,7 @@ def format_reminders_markdown(
         lines.append("今日暂无提醒事项，一切正常。")
         return title, "\n".join(lines) + "\n"
 
-    order = ("已逾期", "应收提醒", "合同已到期", "合同即将到期")
+    order = REMINDER_KIND_ORDER
     grouped: dict[str, list[ReminderItem]] = {k: [] for k in order}
     for item in items:
         grouped.setdefault(item.kind, []).append(item)
@@ -160,8 +165,13 @@ def format_reminders_markdown(
                 )
             lines.append(f"**{item.project_name} · {item.room_no}**")
             lines.append(f"- {_days_text(item.days_delta)}")
-            if kind in {"合同即将到期", "合同已到期"}:
-                lines.append(f"- 月租 {_money_text(item.amount)}")
+            if kind == REMINDER_KIND_CONTRACT_EXPIRED:
+                lines.append("- 合同即将到期，请提醒续签！")
+            elif kind == REMINDER_KIND_DEPOSIT:
+                lines.append(
+                    f"- 剩余押金({item.amount:.2f})="
+                    f"约定({item.due_amount:.2f})-已收({item.paid_amount:.2f})"
+                )
             else:
                 lines.append(
                     "- "

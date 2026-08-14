@@ -106,7 +106,7 @@ class DingTalkHelpersTests(unittest.TestCase):
     def test_format_reminders_markdown(self) -> None:
         items = [
             ReminderItem(
-                kind="已逾期",
+                kind="租金逾期",
                 project_id=1,
                 project_name="一号院",
                 room_id=1,
@@ -123,7 +123,7 @@ class DingTalkHelpersTests(unittest.TestCase):
                 free_amount=500,
             ),
             ReminderItem(
-                kind="应收提醒",
+                kind="租金应收",
                 project_id=1,
                 project_name="一号院",
                 room_id=2,
@@ -145,7 +145,7 @@ class DingTalkHelpersTests(unittest.TestCase):
         )
         self.assertIn("提醒看板", title)
         self.assertIn("汇总", text)
-        self.assertIn("已逾期", text)
+        self.assertIn("租金逾期", text)
         self.assertIn("一号院 · 101", text)
         self.assertIn("逾期 2 天", text)
         self.assertIn(
@@ -158,7 +158,7 @@ class DingTalkHelpersTests(unittest.TestCase):
         )
         self.assertNotIn("免租(0.00)", text)
         self.assertNotIn("折/减(0.00)", text)
-        self.assertIn("应收提醒", text)
+        self.assertIn("租金应收", text)
 
     def test_format_empty(self) -> None:
         title, text = format_reminders_markdown([], today=date(2026, 8, 6))

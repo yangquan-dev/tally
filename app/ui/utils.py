@@ -4,7 +4,7 @@ from calendar import monthrange
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from tkinter import filedialog, messagebox
-from typing import Optional
+from typing import Iterable, Optional, Sequence
 
 
 def center_window(
@@ -62,6 +62,25 @@ def parse_float(text: str, field_name: str = "数值") -> float:
         return float(text)
     except ValueError as exc:
         raise ValueError(f"{field_name}必须是数字") from exc
+
+
+def is_decimal_input(text: str) -> bool:
+    """输入过程校验：仅允许数字与至多一个小数点，小数位最多两位（可为空、以点开头/结尾）。"""
+    if text == "":
+        return True
+    if text.count(".") > 1:
+        return False
+    if text.startswith("."):
+        if text == ".":
+            return True
+        frac = text[1:]
+        return frac.isdigit() and len(frac) <= 2
+    if text.endswith("."):
+        return text[:-1].isdigit()
+    if "." in text:
+        whole, frac = text.split(".", 1)
+        return whole.isdigit() and frac.isdigit() and len(frac) <= 2
+    return text.isdigit()
 
 
 def parse_int(text: str, field_name: str = "数值") -> int:
@@ -137,6 +156,24 @@ def ask_save_filename(
         show_error(f"无法打开保存对话框：{exc}")
         return ""
     return selected or ""
+
+
+def write_xlsx(
+    path: str | Path,
+    headers: Sequence[str],
+    rows: Iterable[Sequence[object]],
+    sheet_title: str = "Sheet1",
+) -> None:
+    """写入简单的单表 xlsx（表头 + 数据行）。"""
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = sheet_title[:31] or "Sheet1"
+    ws.append(list(headers))
+    for row in rows:
+        ws.append(list(row))
+    wb.save(path)
 
 
 def ask_open_filename(
@@ -255,6 +292,18 @@ def billing_month_count(start: date, end: date) -> float:
 def format_money(value: float) -> str:
     # 千分位使用窄不间断空格，避免表格 wraplength 从逗号/小数点处折断金额
     return f"{value:,.2f}".replace(",", "\u202f")
+
+
+def format_decimal(value: object, *, empty: str = "") -> str:
+    """表单回显用：固定两位小数、无千分位；空值返回 empty。"""
+    if value is None:
+        return empty
+    if isinstance(value, str) and not value.strip():
+        return empty
+    try:
+        return f"{float(value):.2f}"
+    except (TypeError, ValueError):
+        return empty
 
 
 def format_remaining_due_formula(

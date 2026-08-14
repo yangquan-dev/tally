@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS leases (
 CREATE TABLE IF NOT EXISTS payments (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     lease_id INTEGER NOT NULL,
+    fee_type TEXT NOT NULL DEFAULT '租金',
     period_start TEXT NOT NULL,
     period_end TEXT NOT NULL,
     amount REAL NOT NULL,
@@ -113,6 +114,7 @@ class Database:
             self._migrate_lease_payment_period(conn)
             self._migrate_lease_tenant(conn)
             self._migrate_payment_timestamps(conn)
+            self._migrate_payment_fee_type(conn)
             self._migrate_free_period_amount(conn)
 
     def _migrate_lease_payment_period(self, conn: sqlite3.Connection) -> None:
@@ -125,12 +127,23 @@ class Database:
         )
 
     def _migrate_lease_tenant(self, conn: sqlite3.Connection) -> None:
-        """为已有租赁补充租赁方。"""
+        """为已有租赁补充租户。"""
         cols = {row[1] for row in conn.execute("PRAGMA table_info(leases)").fetchall()}
         if "tenant" in cols:
             return
         conn.execute(
             "ALTER TABLE leases ADD COLUMN tenant TEXT NOT NULL DEFAULT ''"
+        )
+
+    def _migrate_payment_fee_type(self, conn: sqlite3.Connection) -> None:
+        """为已有缴费补充费用类型（默认租金）。"""
+        cols = {
+            row[1] for row in conn.execute("PRAGMA table_info(payments)").fetchall()
+        }
+        if "fee_type" in cols:
+            return
+        conn.execute(
+            "ALTER TABLE payments ADD COLUMN fee_type TEXT NOT NULL DEFAULT '租金'"
         )
 
     def _migrate_payment_timestamps(self, conn: sqlite3.Connection) -> None:

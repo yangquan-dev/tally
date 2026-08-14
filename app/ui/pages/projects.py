@@ -47,41 +47,42 @@ class ProjectsPage(ctk.CTkFrame):
         ).grid(row=0, column=0, sticky="w")
 
         search_box = ctk.CTkFrame(header, fg_color="transparent")
-        search_box.grid(row=0, column=1, sticky="e", padx=(12, 8))
+        search_box.grid(row=0, column=2, sticky="e", padx=(12, 0))
         self.search_var = ctk.StringVar(value="")
         self.search_entry = ctk.CTkEntry(
             search_box,
             textvariable=self.search_var,
             placeholder_text="按项目名称搜索",
-            width=200,
+            width=160,
         )
         self.search_entry.pack(side="left")
         self.search_entry.bind("<Return>", lambda _e: self.refresh())
         ctk.CTkButton(
-            search_box, text="查询", width=64, command=self.refresh
+            search_box, text="查询", height=28, width=52, command=self.refresh
         ).pack(side="left", padx=(8, 0))
         ctk.CTkButton(
             search_box,
             text="重置",
-            width=64,
+            height=28,
+            width=52,
             fg_color="#6b7280",
             command=self._reset_search,
         ).pack(side="left", padx=(6, 0))
 
         actions = ctk.CTkFrame(header, fg_color="transparent")
-        actions.grid(row=0, column=2, sticky="e")
-        ctk.CTkButton(actions, text="新建项目", width=100, command=self.create_project).pack(
-            side="left", padx=4
+        actions.grid(row=0, column=3, sticky="e", padx=(10, 8))
+        ctk.CTkButton(actions, text="新建项目", height=28, width=80, command=self.create_project).pack(
+            side="left", padx=(0, 4)
         )
-        ctk.CTkButton(actions, text="编辑", width=80, command=self.edit_project).pack(
+        ctk.CTkButton(actions, text="编辑", height=28, width=56, command=self.edit_project).pack(
             side="left", padx=4
         )
         ctk.CTkButton(
-            actions, text="删除", width=80, fg_color="#b91c1c", command=self.delete_project
+            actions, text="删除", height=28, width=56, fg_color="#b91c1c", command=self.delete_project
         ).pack(side="left", padx=4)
         ctk.CTkButton(
-            actions, text="管理房间", width=100, command=self.open_rooms
-        ).pack(side="left", padx=4)
+            actions, text="管理房间", height=28, width=80, command=self.open_rooms
+        ).pack(side="left", padx=(4, 0))
 
         self.table = DataTable(
             self,

@@ -62,9 +62,9 @@ class SettingsPage(ctk.CTkFrame):
         )
         self.subtitle.grid(row=0, column=0, sticky="ew", padx=(0, 12))
         self.save_btn = ctk.CTkButton(
-            meta, text="保存配置", width=110, command=self.save
+            meta, text="保存配置", height=28, width=80, command=self.save
         )
-        self.save_btn.grid(row=0, column=1, sticky="e")
+        self.save_btn.grid(row=0, column=1, sticky="e", padx=(10, 8))
 
         # 下方配置内容可滚动，顶部保持固定
         self.scroll = ctk.CTkScrollableFrame(self, fg_color="transparent")
@@ -98,7 +98,7 @@ class SettingsPage(ctk.CTkFrame):
         self.storage_entry = ctk.CTkEntry(card, textvariable=self.storage_var)
         self.storage_entry.grid(row=row, column=1, sticky="ew", padx=(0, 8), pady=10)
         self.browse_btn = ctk.CTkButton(
-            card, text="选择文件夹", width=100, command=self.browse_storage
+            card, text="选择文件夹", height=28, width=88, command=self.browse_storage
         )
         self.browse_btn.grid(row=row, column=2, sticky="e", padx=(0, 20), pady=10)
 
@@ -170,13 +170,13 @@ class SettingsPage(ctk.CTkFrame):
         db_actions = ctk.CTkFrame(backup_card, fg_color="transparent")
         db_actions.grid(row=1, column=1, columnspan=2, sticky="w", padx=(0, 20), pady=10)
         self.export_db_btn = ctk.CTkButton(
-            db_actions, text="导出数据库", width=110, command=self.export_database
+            db_actions, text="导出数据库", height=28, width=88, command=self.export_database
         )
-        self.export_db_btn.pack(side="left")
+        self.export_db_btn.pack(side="left", padx=(0, 4))
         self.import_db_btn = ctk.CTkButton(
-            db_actions, text="导入数据库", width=110, command=self.import_database
+            db_actions, text="导入数据库", height=28, width=88, command=self.import_database
         )
-        self.import_db_btn.pack(side="left", padx=(8, 0))
+        self.import_db_btn.pack(side="left", padx=(4, 0))
         ctk.CTkLabel(
             backup_card,
             text="导出备份当前数据；导入将覆盖现有数据（覆盖前自动生成 .bak）",
@@ -282,7 +282,8 @@ class SettingsPage(ctk.CTkFrame):
         self.dingtalk_test_btn = ctk.CTkButton(
             dingtalk_card,
             text="测试推送",
-            width=100,
+            height=28,
+            width=80,
             command=self.test_dingtalk_push,
         )
         self.dingtalk_test_btn.grid(row=8, column=2, sticky="e", padx=20, pady=(0, 16))
@@ -322,16 +323,21 @@ class SettingsPage(ctk.CTkFrame):
         self.remove_license_btn = ctk.CTkButton(
             license_actions,
             text="移除授权",
-            width=100,
+            height=28,
+            width=80,
             fg_color="#6b7280",
             hover_color="#4b5563",
             command=self.remove_license,
         )
-        self.remove_license_btn.pack(side="right")
+        self.remove_license_btn.pack(side="right", padx=(4, 0))
         self.import_license_btn = ctk.CTkButton(
-            license_actions, text="导入授权", width=100, command=self.import_license
+            license_actions,
+            text="导入授权",
+            height=28,
+            width=80,
+            command=self.import_license,
         )
-        self.import_license_btn.pack(side="right", padx=(0, 8))
+        self.import_license_btn.pack(side="right", padx=(0, 4))
         ctk.CTkLabel(
             license_card,
             text="安装后须手动导入 .lic；到期后有 7 天宽限期，宽限期结束后需更换新授权",
@@ -360,12 +366,13 @@ class SettingsPage(ctk.CTkFrame):
         self.uninstall_btn = ctk.CTkButton(
             self.uninstall_card,
             text="卸载",
-            width=80,
+            height=28,
+            width=56,
             fg_color="#b91c1c",
             hover_color="#991b1b",
             command=self.uninstall,
         )
-        self.uninstall_btn.grid(row=1, column=1, sticky="e", padx=20, pady=(0, 16))
+        self.uninstall_btn.grid(row=1, column=1, sticky="e", padx=(10, 20), pady=(0, 16))
 
     def browse_storage(self) -> None:
         if not self.services.license.allow_business:

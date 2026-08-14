@@ -41,6 +41,7 @@ def collect_package_resources() -> tuple[list, list, list[str]]:
         # PyNaCl → cffi；Windows 打包缺此模块会 ModuleNotFoundError
         "cffi",
         "_cffi_backend",
+        "openpyxl",
     ]
 
     try:
@@ -48,7 +49,7 @@ def collect_package_resources() -> tuple[list, list, list[str]]:
     except Exception:
         return datas, binaries, hiddenimports
 
-    for pkg in ("customtkinter", "tkcalendar", "babel", "nacl", "cffi"):
+    for pkg in ("customtkinter", "tkcalendar", "babel", "nacl", "cffi", "openpyxl"):
         try:
             pkg_datas, pkg_binaries, pkg_hidden = collect_all(pkg)
             datas += pkg_datas

@@ -3,8 +3,8 @@ from __future__ import annotations
 import customtkinter as ctk
 
 from app.services import AppServices, ValidationError
-from app.ui.utils import ask_yes_no, parse_float, show_error, show_info
-from app.ui.widgets import DataTable, FormDialog
+from app.ui.utils import ask_yes_no, format_decimal, parse_float, show_error, show_info
+from app.ui.widgets import DataTable, DecimalEntry, FormDialog
 
 STATUS_TAGS = {
     "空置": "vacant",
@@ -30,7 +30,7 @@ class RoomFormDialog(FormDialog):
         default_name = initial.get("project_name") or (names[0] if names else "")
         self.project_var = ctk.StringVar(value=default_name)
         self.room_no_var = ctk.StringVar(value=initial.get("room_no", ""))
-        self.area_var = ctk.StringVar(value=str(initial.get("area", "")))
+        self.area_var = ctk.StringVar(value=format_decimal(initial.get("area", "")))
 
         project_widget = ctk.CTkOptionMenu(
             self.body, values=names or ["无项目"], variable=self.project_var
@@ -39,7 +39,7 @@ class RoomFormDialog(FormDialog):
             project_widget.configure(state="disabled")
         self.add_field(0, "所属项目", project_widget)
         self.add_field(1, "房间号", ctk.CTkEntry(self.body, textvariable=self.room_no_var))
-        self.add_field(2, "面积(㎡)", ctk.CTkEntry(self.body, textvariable=self.area_var))
+        self.add_field(2, "面积(㎡)", DecimalEntry(self.body, textvariable=self.area_var))
 
     def collect(self) -> dict:
         if not self.projects:
@@ -70,45 +70,39 @@ class RoomsPage(ctk.CTkFrame):
         ).grid(row=0, column=0, sticky="w")
 
         filter_box = ctk.CTkFrame(header, fg_color="transparent")
-        filter_box.grid(row=0, column=1, sticky="e", padx=(12, 8))
-        ctk.CTkLabel(filter_box, text="项目", text_color="#6b7280").pack(
-            side="left", padx=(0, 8)
-        )
+        filter_box.grid(row=0, column=2, sticky="e", padx=(12, 0))
         self.project_var = ctk.StringVar(value="全部项目")
         self.project_menu = ctk.CTkOptionMenu(
             filter_box,
             values=["全部项目"],
             variable=self.project_var,
             command=self._on_project_filter_changed,
-            width=110,
+            width=88,
             dynamic_resizing=False,
         )
         self.project_menu.pack(side="left")
-        ctk.CTkLabel(filter_box, text="房间号", text_color="#6b7280").pack(
-            side="left", padx=(12, 8)
-        )
         self.room_var = ctk.StringVar(value="全部房间")
         self.room_menu = ctk.CTkOptionMenu(
             filter_box,
             values=["全部房间"],
             variable=self.room_var,
             command=lambda _v: self.refresh(),
-            width=110,
+            width=88,
             dynamic_resizing=False,
         )
-        self.room_menu.pack(side="left")
+        self.room_menu.pack(side="left", padx=(8, 0))
 
         actions = ctk.CTkFrame(header, fg_color="transparent")
-        actions.grid(row=0, column=2, sticky="e")
-        ctk.CTkButton(actions, text="新建房间", width=100, command=self.create_room).pack(
-            side="left", padx=4
+        actions.grid(row=0, column=3, sticky="e", padx=(10, 8))
+        ctk.CTkButton(actions, text="新建房间", height=28, width=80, command=self.create_room).pack(
+            side="left", padx=(0, 4)
         )
-        ctk.CTkButton(actions, text="编辑", width=80, command=self.edit_room).pack(
+        ctk.CTkButton(actions, text="编辑", height=28, width=56, command=self.edit_room).pack(
             side="left", padx=4
         )
         ctk.CTkButton(
-            actions, text="删除", width=80, fg_color="#b91c1c", command=self.delete_room
-        ).pack(side="left", padx=4)
+            actions, text="删除", height=28, width=56, fg_color="#b91c1c", command=self.delete_room
+        ).pack(side="left", padx=(4, 0))
 
         self.table = DataTable(
             self,

@@ -84,6 +84,17 @@ DISCOUNT_KIND_LABELS = {
     DISCOUNT_KIND_AMOUNT: "立减",
 }
 
+FEE_TYPE_RENT = "租金"
+FEE_TYPE_DEPOSIT = "押金"
+FEE_TYPE_OPTIONS = (FEE_TYPE_RENT, FEE_TYPE_DEPOSIT)
+
+
+def normalize_fee_type(value: str | None) -> str:
+    text = (value or "").strip()
+    if text in FEE_TYPE_OPTIONS:
+        return text
+    return FEE_TYPE_RENT
+
 
 @dataclass
 class LeaseDiscount:
@@ -100,7 +111,7 @@ class LeaseDiscount:
         return f"{start.isoformat()}\u00a0~\u00a0{end.isoformat()}"
 
     def value_text(self) -> str:
-        return f"{self.value:g}"
+        return f"{self.value:.2f}"
 
     def label(self) -> str:
         kind_label = DISCOUNT_KIND_LABELS.get(self.kind, self.kind)
@@ -220,11 +231,17 @@ class Payment:
     amount: float
     paid_at: date
     note: str
+    fee_type: str = FEE_TYPE_RENT
     room_no: str = ""
     project_name: str = ""
     project_id: int = 0
+    tenant: str = ""
     created_at: str = ""
     updated_at: str = ""
+
+    def __post_init__(self) -> None:
+        self.fee_type = normalize_fee_type(self.fee_type)
+        self.tenant = (self.tenant or "").strip()
 
     @classmethod
     def from_row(cls, row: Any) -> "Payment":
@@ -239,9 +256,13 @@ class Payment:
             amount=row["amount"],
             paid_at=_parse_date(row["paid_at"]),  # type: ignore[arg-type]
             note=row["note"] or "",
+            fee_type=normalize_fee_type(
+                row["fee_type"] if "fee_type" in keys else None
+            ),
             room_no=row["room_no"] if "room_no" in keys else "",
             project_name=row["project_name"] if "project_name" in keys else "",
             project_id=row["project_id"] if "project_id" in keys else 0,
+            tenant=row["tenant"] if "tenant" in keys else "",
             created_at=created_at or "",
             updated_at=updated_at or created_at or "",
         )
@@ -259,7 +280,7 @@ class RentPeriod:
 
 @dataclass
 class ReminderItem:
-    kind: str  # 应收提醒 / 已逾期 / 合同即将到期
+    kind: str  # 押金应收 / 租金逾期 / 租金应收 / 合同到期（将到期）
     project_id: int
     project_name: str
     room_id: int
@@ -267,11 +288,24 @@ class ReminderItem:
     lease_id: int
     period_start: Optional[date]
     period_end: Optional[date]
-    amount: float  # 剩余应缴；合同类为月租
+    amount: float  # 剩余应缴；合同类仅作占位（看板展示续签提示）
     days_delta: int
     detail: str
-    tenant: str = ""  # 租赁方
+    tenant: str = ""  # 租户
     due_amount: float = 0.0  # 应缴（折减前）
     paid_amount: float = 0.0  # 已缴
     discount_amount: float = 0.0  # 折/减
     free_amount: float = 0.0  # 免租（按免租期起止计算）
+
+
+REMINDER_KIND_DEPOSIT = "押金应收"
+REMINDER_KIND_RENT_OVERDUE = "租金逾期"
+REMINDER_KIND_RENT_DUE = "租金应收"
+REMINDER_KIND_CONTRACT_EXPIRED = "合同到期"
+REMINDER_KIND_ORDER = (
+    REMINDER_KIND_DEPOSIT,
+    REMINDER_KIND_RENT_OVERDUE,
+    REMINDER_KIND_RENT_DUE,
+    REMINDER_KIND_CONTRACT_EXPIRED,
+)
+REMINDER_KIND_RANK = {kind: idx for idx, kind in enumerate(REMINDER_KIND_ORDER)}

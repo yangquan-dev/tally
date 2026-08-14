@@ -28,15 +28,23 @@ from app.models import (
     DISCOUNT_KIND_AMOUNT,
     DISCOUNT_KIND_OPTIONS,
     DISCOUNT_KIND_RATE,
+    FEE_TYPE_DEPOSIT,
+    FEE_TYPE_RENT,
     FreePeriod,
     Lease,
     LeaseDiscount,
     PAYMENT_PERIOD_OPTIONS,
     Payment,
     Project,
+    REMINDER_KIND_CONTRACT_EXPIRED,
+    REMINDER_KIND_DEPOSIT,
+    REMINDER_KIND_RANK,
+    REMINDER_KIND_RENT_DUE,
+    REMINDER_KIND_RENT_OVERDUE,
     ReminderItem,
     RentPeriod,
     Room,
+    normalize_fee_type,
 )
 from app.repositories import (
     LeaseRepository,
@@ -568,7 +576,7 @@ class LeaseService:
     ) -> int:
         tenant_name = (tenant or "").strip()
         if not tenant_name:
-            raise ValidationError("租赁方不能为空")
+            raise ValidationError("租户不能为空")
         normalized, period, normalized_discounts = self._validate(
             room_id,
             deposit,
@@ -615,9 +623,9 @@ class LeaseService:
         tenant_name = (
             (tenant if tenant is not None else lease.tenant) or ""
         ).strip()
-        # 生效合同必须填写租赁方；结束旧数据可保留空值以便兼容迁移
+        # 生效合同必须填写租户；结束旧数据可保留空值以便兼容迁移
         if status == "生效" and not tenant_name:
-            raise ValidationError("租赁方不能为空")
+            raise ValidationError("租户不能为空")
         periods = free_periods if free_periods is not None else (lease.free_periods or [])
         discount_items = (
             discounts if discounts is not None else (lease.discounts or [])
@@ -674,14 +682,39 @@ class PaymentService:
         self.repo = PaymentRepository(db)
         self.lease_repo = LeaseRepository(db)
 
-    def list_all(self, project_id: Optional[int] = None) -> list[Payment]:
-        return self.repo.list_all(project_id)
+    def list_all(
+        self,
+        project_id: Optional[int] = None,
+        fee_type: Optional[str] = None,
+    ) -> list[Payment]:
+        return self.repo.list_all(project_id, fee_type=fee_type)
 
-    def list_by_lease(self, lease_id: int) -> list[Payment]:
-        return self.repo.list_by_lease(lease_id)
+    def list_by_lease(
+        self, lease_id: int, fee_type: Optional[str] = None
+    ) -> list[Payment]:
+        return self.repo.list_by_lease(lease_id, fee_type=fee_type)
 
     def get(self, payment_id: int) -> Optional[Payment]:
         return self.repo.get(payment_id)
+
+    def deposit_paid(
+        self, lease_id: int, *, exclude_payment_id: Optional[int] = None
+    ) -> float:
+        total = 0.0
+        for pay in self.repo.list_by_lease(lease_id, fee_type=FEE_TYPE_DEPOSIT):
+            if exclude_payment_id is not None and pay.id == exclude_payment_id:
+                continue
+            total += float(pay.amount)
+        return round(total, 2)
+
+    def deposit_remaining(
+        self, lease_id: int, *, exclude_payment_id: Optional[int] = None
+    ) -> float:
+        lease = self.lease_repo.get(lease_id)
+        if not lease:
+            raise ValidationError("租赁不存在")
+        paid = self.deposit_paid(lease_id, exclude_payment_id=exclude_payment_id)
+        return round(max(0.0, float(lease.deposit) - paid), 2)
 
     def _validate(
         self,
@@ -691,14 +724,25 @@ class PaymentService:
         amount: float,
         *,
         exclude_payment_id: Optional[int] = None,
-    ) -> None:
+        fee_type: str = FEE_TYPE_RENT,
+    ) -> str:
+        fee = normalize_fee_type(fee_type)
         if amount <= 0:
             raise ValidationError("缴费金额必须大于 0")
-        if period_end < period_start:
-            raise ValidationError("缴费对应结束时间不能早于起始时间")
         lease = self.lease_repo.get(lease_id)
         if not lease:
             raise ValidationError("租赁不存在")
+        if fee == FEE_TYPE_DEPOSIT:
+            remaining = self.deposit_remaining(
+                lease_id, exclude_payment_id=exclude_payment_id
+            )
+            if amount > remaining + 0.009:
+                raise ValidationError(
+                    f"押金剩余应缴 ¥{remaining:.2f}，当次缴纳不能超过该金额"
+                )
+            return fee
+        if period_end < period_start:
+            raise ValidationError("缴费对应结束时间不能早于起始时间")
         if period_start < lease.start_date or period_end > lease.end_date:
             raise ValidationError("缴费周期必须落在租赁期内")
         self._validate_period_cap(
@@ -708,6 +752,7 @@ class PaymentService:
             amount,
             exclude_payment_id=exclude_payment_id,
         )
+        return fee
 
     def _validate_period_cap(
         self,
@@ -728,6 +773,7 @@ class PaymentService:
             amount=amount,
             paid_at=period_start,
             note="",
+            fee_type=FEE_TYPE_RENT,
         )
         periods = reminder_svc._chargeable_periods(lease)
         covered = [
@@ -780,10 +826,27 @@ class PaymentService:
         amount: float,
         paid_at: date,
         note: str = "",
+        fee_type: str = FEE_TYPE_RENT,
     ) -> int:
-        self._validate(lease_id, period_start, period_end, amount)
+        fee = self._validate(
+            lease_id,
+            period_start,
+            period_end,
+            amount,
+            fee_type=fee_type,
+        )
+        if fee == FEE_TYPE_DEPOSIT:
+            # 押金不参与应收期；起止存实缴日占位
+            period_start = paid_at
+            period_end = paid_at
         return self.repo.create(
-            lease_id, period_start, period_end, amount, paid_at, note.strip()
+            lease_id,
+            period_start,
+            period_end,
+            amount,
+            paid_at,
+            note.strip(),
+            fee_type=fee,
         )
 
     def update(
@@ -794,19 +857,33 @@ class PaymentService:
         amount: float,
         paid_at: date,
         note: str,
+        fee_type: str | None = None,
     ) -> None:
         payment = self.repo.get(payment_id)
         if not payment:
             raise ValidationError("缴费记录不存在")
-        self._validate(
+        fee = normalize_fee_type(
+            fee_type if fee_type is not None else payment.fee_type
+        )
+        fee = self._validate(
             payment.lease_id,
             period_start,
             period_end,
             amount,
             exclude_payment_id=payment_id,
+            fee_type=fee,
         )
+        if fee == FEE_TYPE_DEPOSIT:
+            period_start = paid_at
+            period_end = paid_at
         self.repo.update(
-            payment_id, period_start, period_end, amount, paid_at, note.strip()
+            payment_id,
+            period_start,
+            period_end,
+            amount,
+            paid_at,
+            note.strip(),
+            fee_type=fee,
         )
 
     def delete(self, payment_id: int) -> None:
@@ -1111,11 +1188,12 @@ class ReminderService:
     ) -> dict[tuple[date, date], float]:
         payments = [
             pay
-            for pay in self.payment_repo.list_by_lease(lease.id)
+            for pay in self.payment_repo.list_by_lease(lease.id, fee_type=FEE_TYPE_RENT)
             if exclude_payment_id is None or pay.id != exclude_payment_id
         ]
         if extra_payment is not None:
-            payments.append(extra_payment)
+            if normalize_fee_type(extra_payment.fee_type) == FEE_TYPE_RENT:
+                payments.append(extra_payment)
         return self._allocate_payments_fifo(lease, payments)
 
     @staticmethod
@@ -1202,12 +1280,12 @@ class ReminderService:
         for lease in leases:
             project_name = lease.project_name
 
-            # 合同到期提醒
+            # 合同到期提醒（将到期：进入提前提醒窗口，含到期当天）
             days_to_end = (lease.end_date - today).days
             if 0 <= days_to_end <= expire_days:
                 reminders.append(
                     ReminderItem(
-                        kind="合同即将到期",
+                        kind=REMINDER_KIND_CONTRACT_EXPIRED,
                         project_id=lease.project_id,
                         project_name=project_name,
                         room_id=lease.room_id,
@@ -1221,25 +1299,8 @@ class ReminderService:
                         tenant=lease.tenant or "",
                     )
                 )
-            elif days_to_end < 0:
-                reminders.append(
-                    ReminderItem(
-                        kind="合同已到期",
-                        project_id=lease.project_id,
-                        project_name=project_name,
-                        room_id=lease.room_id,
-                        room_no=lease.room_no,
-                        lease_id=lease.id,
-                        period_start=lease.start_date,
-                        period_end=lease.end_date,
-                        amount=lease.monthly_rent,
-                        days_delta=days_to_end,
-                        detail=f"合同已于 {lease.end_date.isoformat()} 到期",
-                        tenant=lease.tenant or "",
-                    )
-                )
 
-            # 按租赁缴费周期生成应收提醒
+            # 按租赁缴费周期生成租金应收 / 逾期提醒
             for period in self.unpaid_periods(lease, today):
                 remind_from = period.period_start - timedelta(days=rent_days)
                 if today < remind_from:
@@ -1254,13 +1315,13 @@ class ReminderService:
                     "（已部分缴费）" if paid > 0.009 and remaining > 0 else ""
                 )
                 if days_delta < 0:
-                    kind = "已逾期"
+                    kind = REMINDER_KIND_RENT_OVERDUE
                     detail = (
                         f"应收期 {period.period_start} ~ {period.period_end} "
                         f"已逾期 {abs(days_delta)} 天{partial_note}"
                     )
                 else:
-                    kind = "应收提醒"
+                    kind = REMINDER_KIND_RENT_DUE
                     detail = (
                         f"应收期 {period.period_start} ~ {period.period_end}"
                         + ("（含免租区间）" if period.partial_free else "")
@@ -1287,8 +1348,57 @@ class ReminderService:
                     )
                 )
 
-        kind_order = {"已逾期": 0, "应收提醒": 1, "合同已到期": 2, "合同即将到期": 3}
-        reminders.sort(key=lambda r: (kind_order.get(r.kind, 9), r.days_delta, r.project_name))
+            # 押金应收提醒（约定押金 > 0 且仍有剩余）
+            if float(lease.deposit) > 0.009:
+                deposit_paid = round(
+                    sum(
+                        float(pay.amount)
+                        for pay in self.payment_repo.list_by_lease(
+                            lease.id, fee_type=FEE_TYPE_DEPOSIT
+                        )
+                    ),
+                    2,
+                )
+                deposit_remaining = round(
+                    max(0.0, float(lease.deposit) - deposit_paid), 2
+                )
+                if deposit_remaining > 0.009:
+                    days_delta = (lease.start_date - today).days
+                    partial = (
+                        "（已部分缴纳）"
+                        if deposit_paid > 0.009
+                        else ""
+                    )
+                    reminders.append(
+                        ReminderItem(
+                            kind=REMINDER_KIND_DEPOSIT,
+                            project_id=lease.project_id,
+                            project_name=project_name,
+                            room_id=lease.room_id,
+                            room_no=lease.room_no,
+                            lease_id=lease.id,
+                            period_start=lease.start_date,
+                            period_end=lease.end_date,
+                            amount=deposit_remaining,
+                            days_delta=days_delta,
+                            detail=(
+                                f"约定押金 ¥{float(lease.deposit):.2f}，"
+                                f"已收 ¥{deposit_paid:.2f}，"
+                                f"剩余 ¥{deposit_remaining:.2f}{partial}"
+                            ),
+                            tenant=lease.tenant or "",
+                            due_amount=round(float(lease.deposit), 2),
+                            paid_amount=deposit_paid,
+                        )
+                    )
+
+        reminders.sort(
+            key=lambda r: (
+                REMINDER_KIND_RANK.get(r.kind, 9),
+                r.days_delta,
+                r.project_name,
+            )
+        )
         return reminders
 
 

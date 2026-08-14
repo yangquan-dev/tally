@@ -1,24 +1,26 @@
 from __future__ import annotations
 
-import csv
 from datetime import date, datetime
-from pathlib import Path
 
 import customtkinter as ctk
 
+from app.models import FEE_TYPE_DEPOSIT, FEE_TYPE_RENT
 from app.services import AppServices, ValidationError
 from app.ui.utils import (
     ask_save_filename,
     ask_yes_no,
     format_date_range,
+    format_decimal,
     format_money,
+    format_remaining_due_formula,
     parse_date,
     parse_float,
     show_error,
     show_info,
     today_str,
+    write_xlsx,
 )
-from app.ui.widgets import DataTable, DatePickerField, FormDialog
+from app.ui.widgets import DataTable, DatePickerField, DecimalEntry, FormDialog
 
 
 class PaymentFormDialog(FormDialog):
@@ -56,13 +58,11 @@ class PaymentFormDialog(FormDialog):
         self._summary_remaining_var = ctk.StringVar(value="(—)")
         self._summary_suffix_var = ctk.StringVar(value="")
         init_amount = initial.get("amount", "")
-        self.amount_var = ctk.StringVar(
-            value="" if init_amount in ("", None) else str(init_amount)
-        )
+        self.amount_var = ctk.StringVar(value=format_decimal(init_amount))
         self.paid_at_var = ctk.StringVar(value=initial.get("paid_at", today_str()))
         self.note_var = ctk.StringVar(value=initial.get("note", ""))
         self._keep_initial_amount = bool(
-            str(init_amount).strip() and exclude_payment_id is not None
+            format_decimal(init_amount) and exclude_payment_id is not None
         )
         self._initial_start = (initial.get("period_start") or "").strip()
         self._initial_end = (initial.get("period_end") or "").strip()
@@ -122,7 +122,7 @@ class PaymentFormDialog(FormDialog):
         self._summary_suffix_label.pack(side="left", fill="x", expand=True)
         self.add_field(3, "缴费起止", self.term_label)
         self.add_field(4, "费用明细", summary_box)
-        self.add_field(5, "当次缴纳", ctk.CTkEntry(self.body, textvariable=self.amount_var))
+        self.add_field(5, "当次缴纳", DecimalEntry(self.body, textvariable=self.amount_var))
         self.paid_at_picker = DatePickerField(self.body, textvariable=self.paid_at_var)
         self.add_field(6, "实缴日期", self.paid_at_picker)
         self.add_field(7, "备注", ctk.CTkEntry(self.body, textvariable=self.note_var))
@@ -133,9 +133,8 @@ class PaymentFormDialog(FormDialog):
     def _format_amount_summary(
         due: float, paid: float, free: float, discount: float, remaining: float
     ) -> str:
-        return (
-            f"剩余应缴({remaining:.2f})=应缴({due:.2f})-已缴({paid:.2f})-"
-            f"免租({free:.2f})-折/减({discount:.2f})"
+        return format_remaining_due_formula(
+            remaining, due, paid, free, discount, with_prefix=True
         )
 
     def _set_amount_summary(
@@ -156,8 +155,13 @@ class PaymentFormDialog(FormDialog):
         prefix = "剩余应缴" if period_count <= 1 else f"剩余应缴合计({period_count}期)"
         self._summary_prefix_var.set(prefix)
         self._summary_remaining_var.set(f"({remaining:.2f})")
+        suffix = format_remaining_due_formula(
+            remaining, due, paid, free, discount, with_prefix=False
+        )
+        # with_prefix=False 形如 "(x.xx)=应缴..."; 金额已单独标红，这里只保留公式尾部
+        amount_token = f"({remaining:.2f})"
         self._summary_suffix_var.set(
-            f"=应缴({due:.2f})-已缴({paid:.2f})-免租({free:.2f})-折/减({discount:.2f})"
+            suffix[len(amount_token) :] if suffix.startswith(amount_token) else suffix
         )
         self._summary_remaining_label.configure(
             text_color="#b91c1c" if remaining > 0 else "#374151"
@@ -376,6 +380,7 @@ class PaymentFormDialog(FormDialog):
         amount = min(amount, self._due_amount)
         return {
             "lease_id": lease_id,
+            "fee_type": FEE_TYPE_RENT,
             "period_start": self._period_start,
             "period_end": self._period_end,
             "amount": round(amount, 2),
@@ -384,80 +389,217 @@ class PaymentFormDialog(FormDialog):
         }
 
 
+class DepositFormDialog(FormDialog):
+    """押金登记：不绑定应收期，金额不超过押金剩余应缴。"""
+
+    def __init__(
+        self,
+        master,
+        title: str,
+        services: AppServices,
+        leases: list[tuple[int, str]],
+        initial: dict | None = None,
+        lock_lease: bool = False,
+        exclude_payment_id: int | None = None,
+    ) -> None:
+        super().__init__(master, title, width=560, height=420)
+        self.services = services
+        self.leases = leases
+        self.exclude_payment_id = exclude_payment_id
+        self._remaining = 0.0
+        initial = initial or {}
+
+        lease_labels = [label for _, label in leases]
+        self.lease_var = ctk.StringVar(
+            value=initial.get("lease_label") or (lease_labels[0] if lease_labels else "")
+        )
+        self.agreed_var = ctk.StringVar(value="—")
+        self.paid_var = ctk.StringVar(value="—")
+        self.remaining_var = ctk.StringVar(value="—")
+        init_amount = initial.get("amount", "")
+        self.amount_var = ctk.StringVar(value=format_decimal(init_amount))
+        self.paid_at_var = ctk.StringVar(value=initial.get("paid_at", today_str()))
+        self.note_var = ctk.StringVar(value=initial.get("note", ""))
+        self._keep_initial_amount = bool(
+            format_decimal(init_amount) and exclude_payment_id is not None
+        )
+
+        lease_widget = ctk.CTkOptionMenu(
+            self.body,
+            values=lease_labels or ["无租赁"],
+            variable=self.lease_var,
+            command=lambda _v: self._reload_summary(sync_amount=True),
+        )
+        if lock_lease or not lease_labels:
+            lease_widget.configure(state="disabled")
+        self.add_field(0, "租赁合同", lease_widget)
+
+        readonly = "#374151"
+        self.add_field(
+            1,
+            "约定押金",
+            ctk.CTkLabel(
+                self.body, textvariable=self.agreed_var, anchor="w", text_color=readonly
+            ),
+        )
+        self.add_field(
+            2,
+            "已收押金",
+            ctk.CTkLabel(
+                self.body, textvariable=self.paid_var, anchor="w", text_color=readonly
+            ),
+        )
+        self.remaining_label = ctk.CTkLabel(
+            self.body, textvariable=self.remaining_var, anchor="w", text_color="#b91c1c"
+        )
+        self.add_field(3, "剩余未收", self.remaining_label)
+        self.add_field(4, "当次缴纳", DecimalEntry(self.body, textvariable=self.amount_var))
+        self.add_field(5, "实缴日期", DatePickerField(self.body, textvariable=self.paid_at_var))
+        self.add_field(6, "备注", ctk.CTkEntry(self.body, textvariable=self.note_var))
+        self._reload_summary(sync_amount=not self._keep_initial_amount)
+
+    def _current_lease_id(self) -> int | None:
+        label = self.lease_var.get()
+        for lease_id, lease_label in self.leases:
+            if lease_label == label:
+                return lease_id
+        return None
+
+    def _reload_summary(self, sync_amount: bool = False) -> None:
+        lease_id = self._current_lease_id()
+        if lease_id is None or self.services.payments is None or self.services.leases is None:
+            self.agreed_var.set("—")
+            self.paid_var.set("—")
+            self.remaining_var.set("—")
+            self._remaining = 0.0
+            return
+        lease = self.services.leases.get(lease_id)
+        if not lease:
+            return
+        paid = self.services.payments.deposit_paid(
+            lease_id, exclude_payment_id=self.exclude_payment_id
+        )
+        remaining = self.services.payments.deposit_remaining(
+            lease_id, exclude_payment_id=self.exclude_payment_id
+        )
+        self._remaining = remaining
+        self.agreed_var.set(format_money(lease.deposit))
+        self.paid_var.set(format_money(paid))
+        self.remaining_var.set(format_money(remaining))
+        self.remaining_label.configure(
+            text_color="#b91c1c" if remaining > 0 else "#374151"
+        )
+        if sync_amount:
+            self.amount_var.set(f"{remaining:.2f}" if remaining > 0 else "")
+
+    def collect(self) -> dict:
+        lease_id = self._current_lease_id()
+        if lease_id is None:
+            raise ValueError("请先创建生效中的租赁")
+        if self._remaining <= 0:
+            raise ValueError("押金已收齐，无需再登记")
+        amount = parse_float(self.amount_var.get(), "当次缴纳")
+        if amount <= 0 or amount > self._remaining + 0.009:
+            raise ValueError(
+                f"当次缴纳须大于 0 且不超过剩余未收 ¥{self._remaining:.2f}"
+            )
+        amount = min(amount, self._remaining)
+        paid_at = parse_date(self.paid_at_var.get(), "实缴日期")
+        return {
+            "lease_id": lease_id,
+            "fee_type": FEE_TYPE_DEPOSIT,
+            "period_start": paid_at,
+            "period_end": paid_at,
+            "amount": round(amount, 2),
+            "paid_at": paid_at,
+            "note": self.note_var.get().strip(),
+        }
+
+
 class PaymentsPage(ctk.CTkFrame):
     def __init__(self, master, services: AppServices, **kwargs) -> None:
         super().__init__(master, fg_color="transparent", **kwargs)
         self.services = services
+        self.fee_type = FEE_TYPE_RENT
         self.grid_rowconfigure(1, weight=1)
         self.grid_columnconfigure(0, weight=1)
 
         header = ctk.CTkFrame(self, fg_color="transparent")
         header.grid(row=0, column=0, sticky="ew", pady=(0, 12))
+        # 仅中间空白列伸缩，避免压缩筛选/操作区
         header.grid_columnconfigure(1, weight=1)
+
+        title_box = ctk.CTkFrame(header, fg_color="transparent")
+        title_box.grid(row=0, column=0, sticky="w")
         ctk.CTkLabel(
-            header, text="收费登记", font=ctk.CTkFont(size=22, weight="bold")
-        ).grid(row=0, column=0, sticky="w")
+            title_box, text="收费登记", font=ctk.CTkFont(size=22, weight="bold")
+        ).pack(side="left")
+        self.fee_tabs = ctk.CTkSegmentedButton(
+            title_box,
+            values=[FEE_TYPE_RENT, FEE_TYPE_DEPOSIT],
+            command=self._on_fee_tab_changed,
+            width=140,
+        )
+        self.fee_tabs.set(FEE_TYPE_RENT)
+        self.fee_tabs.pack(side="left", padx=(12, 0))
 
         filter_box = ctk.CTkFrame(header, fg_color="transparent")
-        filter_box.grid(row=0, column=1, sticky="e", padx=(12, 8))
-        ctk.CTkLabel(filter_box, text="项目", text_color="#6b7280").pack(
-            side="left", padx=(0, 8)
-        )
+        filter_box.grid(row=0, column=2, sticky="e", padx=(12, 0))
         self.project_var = ctk.StringVar(value="全部项目")
         self.project_menu = ctk.CTkOptionMenu(
             filter_box,
             values=["全部项目"],
             variable=self.project_var,
             command=self._on_project_filter_changed,
-            width=120,
+            width=88,
             dynamic_resizing=False,
         )
         self.project_menu.pack(side="left")
-        ctk.CTkLabel(filter_box, text="房间号", text_color="#6b7280").pack(
-            side="left", padx=(12, 8)
-        )
         self.room_var = ctk.StringVar(value="全部房间")
         self.room_menu = ctk.CTkOptionMenu(
             filter_box,
             values=["全部房间"],
             variable=self.room_var,
             command=lambda _v: self.refresh(),
-            width=120,
+            width=88,
             dynamic_resizing=False,
         )
-        self.room_menu.pack(side="left")
+        self.room_menu.pack(side="left", padx=(8, 0))
 
         actions = ctk.CTkFrame(header, fg_color="transparent")
-        actions.grid(row=0, column=2, sticky="e")
-        ctk.CTkButton(
-            actions, text="登记缴费", width=100, command=self.create_payment
-        ).pack(side="left", padx=4)
-        ctk.CTkButton(actions, text="编辑", width=80, command=self.edit_payment).pack(
+        actions.grid(row=0, column=3, sticky="e", padx=(10, 8))
+        self.create_btn = ctk.CTkButton(
+            actions, text="登记租金", height=28, width=80, command=self.create_payment
+        )
+        self.create_btn.pack(side="left", padx=(0, 4))
+        ctk.CTkButton(actions, text="编辑", height=28, width=56, command=self.edit_payment).pack(
             side="left", padx=4
         )
         ctk.CTkButton(
-            actions, text="导出 CSV", width=100, command=self.export_csv
+            actions, text="导出", height=28, width=56, command=self.export_xlsx
         ).pack(side="left", padx=4)
         ctk.CTkButton(
-            actions, text="删除", width=80, fg_color="#b91c1c", command=self.delete_payment
-        ).pack(side="left", padx=4)
+            actions, text="删除", height=28, width=56, fg_color="#b91c1c", command=self.delete_payment
+        ).pack(side="left", padx=(4, 0))
 
         self.table = DataTable(
             self,
             columns=[
                 ("id", "ID", 48),
-                ("project", "项目", 140),
-                ("room", "房间", 80),
+                ("project", "项目", 120),
+                ("room", "房间", 70),
+                ("tenant", "租户", 100),
                 ("period", "缴费周期", 150),
                 ("amount", "缴纳金额", 90),
                 ("paid_at", "实缴日期", 90),
                 ("registered_at", "更新时间", 130),
-                ("note", "备注", 160),
+                ("note", "备注", 140),
             ],
             column_anchors={
                 "id": "center",
                 "project": "w",
                 "room": "center",
+                "tenant": "w",
                 "period": "center",
                 "amount": "e",
                 "paid_at": "center",
@@ -468,6 +610,13 @@ class PaymentsPage(ctk.CTkFrame):
             fit_content_columns=("period", "paid_at", "registered_at"),
         )
         self.table.grid(row=1, column=0, sticky="nsew")
+
+    def _on_fee_tab_changed(self, value: str) -> None:
+        self.fee_type = value if value in (FEE_TYPE_RENT, FEE_TYPE_DEPOSIT) else FEE_TYPE_RENT
+        self.create_btn.configure(
+            text="登记租金" if self.fee_type == FEE_TYPE_RENT else "登记押金"
+        )
+        self.refresh()
 
     @staticmethod
     def _format_registered_at(value: str) -> str:
@@ -553,14 +702,23 @@ class PaymentsPage(ctk.CTkFrame):
         return room_no
 
     def _filtered_payments(self):
-        payments = self.services.payments.list_all(self._current_project_id())  # type: ignore[union-attr]
+        payments = self.services.payments.list_all(  # type: ignore[union-attr]
+            self._current_project_id(), fee_type=self.fee_type
+        )
         room_no = self._current_room_no()
         if room_no is not None:
             payments = [p for p in payments if p.room_no == room_no]
         return payments
 
     def _payment_period_label(self, payment) -> str:
-        """多应收期时按行展示各周期；单期仍为一行区间。"""
+        """多应收期时按行展示各周期；押金展示完整租期。"""
+        if payment.fee_type == FEE_TYPE_DEPOSIT:
+            if self.services.leases is None:
+                return "—"
+            lease = self.services.leases.get(payment.lease_id)
+            if not lease:
+                return "—"
+            return format_date_range(lease.start_date, lease.end_date)
         if self.services.leases is None or self.services.reminders is None:
             return format_date_range(payment.period_start, payment.period_end)
         lease = self.services.leases.get(payment.lease_id)
@@ -586,6 +744,7 @@ class PaymentsPage(ctk.CTkFrame):
                     p.id,
                     p.project_name,
                     p.room_no,
+                    p.tenant or "",
                     self._payment_period_label(p),
                     format_money(p.amount),
                     p.paid_at.isoformat(),
@@ -595,53 +754,60 @@ class PaymentsPage(ctk.CTkFrame):
             )
         self.table.set_rows(rows, [str(p.id) for p in payments])
 
-    def export_csv(self) -> None:
+    def export_xlsx(self) -> None:
         if not self.services.is_ready or self.services.payments is None:
             return
         payments = self._filtered_payments()
         if not payments:
             show_info("当前没有可导出的缴费记录")
             return
+        kind = "租金" if self.fee_type == FEE_TYPE_RENT else "押金"
         path = ask_save_filename(
-            title="导出缴费记录",
-            defaultextension=".csv",
-            filetypes=[("CSV 文件", "*.csv")],
-            initialfile=f"缴费记录_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+            title=f"导出{kind}记录",
+            defaultextension=".xlsx",
+            filetypes=[("Excel 文件", "*.xlsx")],
+            initialfile=f"{kind}记录_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
         )
         if not path:
             return
         try:
-            with Path(path).open("w", encoding="utf-8-sig", newline="") as fp:
-                writer = csv.writer(fp)
-                writer.writerow(
+            write_xlsx(
+                path,
+                [
+                    "ID",
+                    "费用类型",
+                    "项目",
+                    "房间",
+                    "租户",
+                    "缴费起始",
+                    "缴费结束",
+                    "缴纳金额",
+                    "实缴日期",
+                    "更新时间",
+                    "备注",
+                ],
+                [
                     [
-                        "ID",
-                        "项目",
-                        "房间",
-                        "缴费起始",
-                        "缴费结束",
-                        "缴纳金额",
-                        "实缴日期",
-                        "更新时间",
-                        "备注",
+                        p.id,
+                        p.fee_type,
+                        p.project_name,
+                        p.room_no,
+                        p.tenant or "",
+                        p.period_start.isoformat(),
+                        p.period_end.isoformat(),
+                        round(p.amount, 2),
+                        p.paid_at.isoformat(),
+                        self._format_registered_at(p.updated_at or p.created_at),
+                        p.note,
                     ]
-                )
-                for p in payments:
-                    writer.writerow(
-                        [
-                            p.id,
-                            p.project_name,
-                            p.room_no,
-                            p.period_start.isoformat(),
-                            p.period_end.isoformat(),
-                            f"{p.amount:.2f}",
-                            p.paid_at.isoformat(),
-                            self._format_registered_at(p.updated_at or p.created_at),
-                            p.note,
-                        ]
-                    )
+                    for p in payments
+                ],
+                sheet_title=f"{kind}记录",
+            )
             show_info(f"已导出 {len(payments)} 条记录")
         except OSError as exc:
+            show_error(f"导出失败：{exc}")
+        except Exception as exc:
             show_error(f"导出失败：{exc}")
 
     def create_payment(self) -> None:
@@ -649,7 +815,10 @@ class PaymentsPage(ctk.CTkFrame):
         if not leases:
             show_info("请先创建生效中的租赁")
             return
-        data = PaymentFormDialog(self, "登记缴费", self.services, leases).show()
+        if self.fee_type == FEE_TYPE_DEPOSIT:
+            data = DepositFormDialog(self, "登记押金", self.services, leases).show()
+        else:
+            data = PaymentFormDialog(self, "登记租金", self.services, leases).show()
         if not data:
             return
         try:
@@ -681,22 +850,34 @@ class PaymentsPage(ctk.CTkFrame):
                 ),
             )
         ]
-        data = PaymentFormDialog(
-            self,
-            "编辑缴费",
-            self.services,
-            leases,
-            {
-                "lease_label": leases[0][1],
-                "period_start": payment.period_start.isoformat(),
-                "period_end": payment.period_end.isoformat(),
-                "amount": payment.amount,
-                "paid_at": payment.paid_at.isoformat(),
-                "note": payment.note,
-            },
-            lock_lease=True,
-            exclude_payment_id=payment_id,
-        ).show()
+        initial = {
+            "lease_label": leases[0][1],
+            "period_start": payment.period_start.isoformat(),
+            "period_end": payment.period_end.isoformat(),
+            "amount": payment.amount,
+            "paid_at": payment.paid_at.isoformat(),
+            "note": payment.note,
+        }
+        if payment.fee_type == FEE_TYPE_DEPOSIT:
+            data = DepositFormDialog(
+                self,
+                "编辑押金",
+                self.services,
+                leases,
+                initial,
+                lock_lease=True,
+                exclude_payment_id=payment_id,
+            ).show()
+        else:
+            data = PaymentFormDialog(
+                self,
+                "编辑租金",
+                self.services,
+                leases,
+                initial,
+                lock_lease=True,
+                exclude_payment_id=payment_id,
+            ).show()
         if not data:
             return
         try:
@@ -707,6 +888,7 @@ class PaymentsPage(ctk.CTkFrame):
                 amount=data["amount"],
                 paid_at=data["paid_at"],
                 note=data["note"],
+                fee_type=data.get("fee_type"),
             )
             self.refresh()
         except (ValidationError, ValueError) as exc:

@@ -2,8 +2,16 @@ from __future__ import annotations
 
 import customtkinter as ctk
 
+from app.models import (
+    REMINDER_KIND_CONTRACT_EXPIRED,
+    REMINDER_KIND_DEPOSIT,
+    REMINDER_KIND_ORDER,
+    REMINDER_KIND_RANK,
+    REMINDER_KIND_RENT_DUE,
+    REMINDER_KIND_RENT_OVERDUE,
+)
 from app.services import AppServices
-from app.ui.utils import format_date_range, format_money, format_remaining_due_formula
+from app.ui.utils import format_date_range, format_remaining_due_formula
 from app.ui.widgets import DataTable
 
 
@@ -32,8 +40,8 @@ class HomePage(ctk.CTkFrame):
         ctk.CTkLabel(
             header, text="提醒看板", font=ctk.CTkFont(size=22, weight="bold")
         ).grid(row=0, column=0, sticky="w")
-        ctk.CTkButton(header, text="刷新", width=80, command=self.refresh).grid(
-            row=0, column=1, sticky="e"
+        ctk.CTkButton(header, text="刷新", height=28, width=56, command=self.refresh).grid(
+            row=0, column=1, sticky="e", padx=(10, 8)
         )
 
         self.stats = ctk.CTkFrame(self, fg_color="transparent")
@@ -44,8 +52,8 @@ class HomePage(ctk.CTkFrame):
         for col, (key, title, color) in enumerate(
             (
                 ("total", "全部", "#111827"),
-                ("overdue", "已逾期", "#b91c1c"),
-                ("due", "应收提醒", "#c2410c"),
+                ("overdue", "租金逾期", "#b91c1c"),
+                ("due", "待收款", "#c2410c"),
                 ("expire", "合同到期", "#1d4ed8"),
             )
         ):
@@ -84,9 +92,9 @@ class HomePage(ctk.CTkFrame):
                 ("kind", "类型", 110),
                 ("project", "项目", 120),
                 ("room", "房间", 70),
-                ("tenant", "租赁方", 100),
-                ("amount", "剩余应缴", 160),
+                ("tenant", "租户", 100),
                 ("period", "周期", 190),
+                ("amount", "关注事项", 220),
             ],
             column_anchors={
                 "days": "center",
@@ -94,8 +102,8 @@ class HomePage(ctk.CTkFrame):
                 "project": "w",
                 "room": "center",
                 "tenant": "w",
-                "amount": "w",
                 "period": "center",
+                "amount": "w",
             },
             rowheight=34,
             style_prefix="TallyReminder",
@@ -136,25 +144,29 @@ class HomePage(ctk.CTkFrame):
         if not self.services.is_ready or self.services.reminders is None:
             return
         items = self.services.reminders.list_reminders()
-        overdue = sum(1 for i in items if i.kind == "已逾期")
-        due = sum(1 for i in items if i.kind == "应收提醒")
-        expire = sum(1 for i in items if i.kind in {"合同即将到期", "合同已到期"})
+        overdue = sum(1 for i in items if i.kind == REMINDER_KIND_RENT_OVERDUE)
+        due = sum(1 for i in items if i.kind == REMINDER_KIND_RENT_DUE)
+        deposit = sum(1 for i in items if i.kind == REMINDER_KIND_DEPOSIT)
+        expire = sum(1 for i in items if i.kind == REMINDER_KIND_CONTRACT_EXPIRED)
         self._stat_labels["total"].configure(text=str(len(items)))
         self._stat_labels["overdue"].configure(text=str(overdue))
-        self._stat_labels["due"].configure(text=str(due))
+        self._stat_labels["due"].configure(text=str(due + deposit))
         self._stat_labels["expire"].configure(text=str(expire))
         if items:
             self.summary.configure(
-                text="排序：逾期 → 应收 → 合同已到期 → 即将到期；应收类展示剩余应缴明细，合同类为月租"
+                text=(
+                    "排序："
+                    + " → ".join(REMINDER_KIND_ORDER)
+                    + "；金额类展示剩余应缴明细，合同到期提示续签"
+                )
             )
         else:
             self.summary.configure(text="今日暂无提醒事项")
 
-        kind_order = {"已逾期": 0, "应收提醒": 1, "合同已到期": 2, "合同即将到期": 3}
         items = sorted(
             items,
             key=lambda i: (
-                kind_order.get(i.kind, 9),
+                REMINDER_KIND_RANK.get(i.kind, 9),
                 i.days_delta,
                 i.project_name,
                 i.room_no,
@@ -176,8 +188,8 @@ class HomePage(ctk.CTkFrame):
                     item.project_name,
                     item.room_no,
                     item.tenant or "",
-                    self._amount_display(item),
                     period,
+                    self._amount_display(item),
                 )
             )
             iids.append(str(idx))
@@ -186,8 +198,18 @@ class HomePage(ctk.CTkFrame):
 
     @staticmethod
     def _amount_display(item):
-        if item.kind in {"合同即将到期", "合同已到期"}:
-            return f"月租 {format_money(item.amount)}"
+        if item.kind == REMINDER_KIND_CONTRACT_EXPIRED:
+            return "合同即将到期，请提醒续签！"
+        if item.kind == REMINDER_KIND_DEPOSIT:
+            amount_token = f"({item.amount:.2f})"
+            suffix = (
+                f"=约定({item.due_amount:.2f})-已收({item.paid_amount:.2f})"
+            )
+            return [
+                ("剩余押金", None),
+                (amount_token, "#b91c1c"),
+                (suffix, None),
+            ]
         # 剩余应缴金额（含英文括号）整段标红，避免拆 Label 产生缝隙
         body = format_remaining_due_formula(
             item.amount,

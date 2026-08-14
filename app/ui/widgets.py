@@ -9,10 +9,24 @@ from typing import Callable, Optional, Sequence, Union
 import customtkinter as ctk
 from tkcalendar import Calendar
 
-from app.ui.utils import center_window
+from app.ui.utils import center_window, is_decimal_input
 
 # 免租期 / 折减列表可视约 3 行（单行含控件与间距约 40px）
 PERIOD_LIST_VIEW_HEIGHT = 120
+
+
+class DecimalEntry(ctk.CTkEntry):
+    """仅允许数字与小数点的输入框（金额、折扣数值等）。"""
+
+    def __init__(self, master: tk.Misc, **kwargs) -> None:
+        super().__init__(master, **kwargs)
+        vcmd = (self.register(self._validate), "%P")
+        # CTkEntry 将 validate 交给内部 tk Entry
+        self.configure(validate="key", validatecommand=vcmd)
+
+    @staticmethod
+    def _validate(proposed: str) -> bool:
+        return is_decimal_input(proposed)
 
 
 def _period_list_frame(master: tk.Misc, grid_row: int) -> ctk.CTkScrollableFrame:
@@ -420,7 +434,7 @@ class DiscountAddDialog(ctk.CTkToplevel):
         add_row(
             1,
             "数值",
-            ctk.CTkEntry(
+            DecimalEntry(
                 body,
                 textvariable=self.value_var,
                 placeholder_text="折扣如 0.85；立减如 200",
@@ -451,7 +465,7 @@ class DiscountAddDialog(ctk.CTkToplevel):
                 f"按租赁月周期添加（起租日对齐）；"
                 f"如选 {lease_start.year:04d}-{lease_start.month:02d} "
                 f"对应 {lease_start.isoformat()} ~ {example_end}；"
-                f"立减不得超过该月周期应缴（非完整月按天折算，完整月上限 {self.monthly_rent:g}）"
+                f"立减不得超过该月周期应缴（非完整月按天折算，完整月上限 {self.monthly_rent:.2f}）"
             ),
             text_color="#6b7280",
             anchor="w",
@@ -527,9 +541,9 @@ class DiscountAddDialog(ctk.CTkToplevel):
                     if numeric > cap + 1e-9:
                         raise ValueError(
                             f"立减金额不能超过该月周期应缴"
-                            f"（{slice_start} ~ {slice_end} 应缴 {cap:g}）"
+                            f"（{slice_start} ~ {slice_end} 应缴 {cap:.2f}）"
                         )
-                rows.append((slice_start, slice_end, kind, value_text))
+                rows.append((slice_start, slice_end, kind, f"{numeric:.2f}"))
             if not rows:
                 raise ValueError("所选月份均已添加或不在租赁期内")
             self.result = rows
@@ -741,7 +755,7 @@ class DiscountPeriodsEditor(ctk.CTkFrame):
                 variable=kind_var,
                 width=84,
             )
-            value_entry = ctk.CTkEntry(
+            value_entry = DecimalEntry(
                 self.list_frame,
                 textvariable=value_var,
                 placeholder_text="如 0.85 / 200",
@@ -827,7 +841,7 @@ class DiscountPeriodsEditor(ctk.CTkFrame):
                 if numeric > cap + 1e-9:
                     raise ValueError(
                         f"第 {idx} 条立减金额不能超过该月周期应缴"
-                        f"（{d_start} ~ {d_end} 应缴 {cap:g}）"
+                        f"（{d_start} ~ {d_end} 应缴 {cap:.2f}）"
                     )
             discounts.append((d_start, d_end, kind, numeric))
         return discounts
