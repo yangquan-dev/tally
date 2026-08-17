@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import OrderedDict
-from datetime import datetime
+from datetime import date, datetime
 
 import customtkinter as ctk
 
@@ -27,6 +27,7 @@ from app.ui.utils import (
 from app.ui.widgets import (
     DataTable,
     DatePickerField,
+    DateRangeField,
     DecimalEntry,
     DiscountPeriodsEditor,
     FormDialog,
@@ -110,8 +111,24 @@ class LeaseFormDialog(FormDialog):
                 variable=self.payment_period_var,
             ),
         )
-        self.add_field(6, "起租时间", DatePickerField(self.body, textvariable=self.start_var))
-        self.add_field(7, "到期时间", DatePickerField(self.body, textvariable=self.end_var))
+        self.add_field(
+            6,
+            "起租时间",
+            DatePickerField(
+                self.body,
+                textvariable=self.start_var,
+                max_date_getter=lambda: self._parse_bound_date(self.end_var.get()),
+            ),
+        )
+        self.add_field(
+            7,
+            "到期时间",
+            DatePickerField(
+                self.body,
+                textvariable=self.end_var,
+                min_date_getter=lambda: self._parse_bound_date(self.start_var.get()),
+            ),
+        )
 
         free_initial = initial.get("free_periods") or []
         self.free_editor = FreePeriodsEditor(self.body, initial=free_initial)
@@ -145,6 +162,18 @@ class LeaseFormDialog(FormDialog):
         values = self._room_values_for(project_name)
         self.room_menu.configure(values=values)
         self.room_var.set(values[0])
+
+    @staticmethod
+    def _parse_bound_date(text: str):
+        raw = (text or "").strip()
+        if not raw:
+            return None
+        try:
+            from datetime import date as _date
+
+            return _date.fromisoformat(raw)
+        except ValueError:
+            return None
 
     def _selected_room_id(self) -> int:
         if not self.rooms:
@@ -223,6 +252,17 @@ class LeasesPage(ctk.CTkFrame):
             command=lambda _v: self.refresh(),
             width=88,
             dynamic_resizing=False,
+        ).pack(side="left", padx=(8, 0))
+        self.term_from_var = ctk.StringVar(value="")
+        self.term_to_var = ctk.StringVar(value="")
+        DateRangeField(
+            filter_box,
+            startvariable=self.term_from_var,
+            endvariable=self.term_to_var,
+            start_placeholder="租期开始",
+            end_placeholder="租期截止",
+            entry_width=74,
+            command=self.refresh,
         ).pack(side="left", padx=(8, 0))
 
         actions = ctk.CTkFrame(header, fg_color="transparent")
@@ -333,6 +373,21 @@ class LeasesPage(ctk.CTkFrame):
             return None
         return room_no
 
+    def _parse_filter_date(self, text: str) -> date | None:
+        raw = (text or "").strip()
+        if not raw:
+            return None
+        try:
+            return date.fromisoformat(raw)
+        except ValueError:
+            return None
+
+    def _term_range(self) -> tuple[date | None, date | None]:
+        return (
+            self._parse_filter_date(self.term_from_var.get()),
+            self._parse_filter_date(self.term_to_var.get()),
+        )
+
     def _filtered_leases(self) -> list[Lease]:
         if not self.services.is_ready or self.services.leases is None:
             return []
@@ -346,6 +401,14 @@ class LeasesPage(ctk.CTkFrame):
         room_no = self._current_room_no()
         if room_no is not None:
             leases = [lease for lease in leases if lease.room_no == room_no]
+        term_from, term_to = self._term_range()
+        if term_from is not None and term_to is not None and term_from > term_to:
+            term_from, term_to = term_to, term_from
+        # 与筛选区间有交集的租期
+        if term_from is not None:
+            leases = [lease for lease in leases if lease.end_date >= term_from]
+        if term_to is not None:
+            leases = [lease for lease in leases if lease.start_date <= term_to]
         return leases
 
     def refresh(self) -> None:

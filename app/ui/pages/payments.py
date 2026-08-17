@@ -20,7 +20,7 @@ from app.ui.utils import (
     today_str,
     write_xlsx,
 )
-from app.ui.widgets import DataTable, DatePickerField, DecimalEntry, FormDialog
+from app.ui.widgets import DataTable, DatePickerField, DateRangeField, DecimalEntry, FormDialog
 
 
 class PaymentFormDialog(FormDialog):
@@ -565,6 +565,17 @@ class PaymentsPage(ctk.CTkFrame):
             dynamic_resizing=False,
         )
         self.room_menu.pack(side="left", padx=(8, 0))
+        self.paid_from_var = ctk.StringVar(value="")
+        self.paid_to_var = ctk.StringVar(value="")
+        DateRangeField(
+            filter_box,
+            startvariable=self.paid_from_var,
+            endvariable=self.paid_to_var,
+            start_placeholder="实缴开始",
+            end_placeholder="实缴截止",
+            entry_width=74,
+            command=self.refresh,
+        ).pack(side="left", padx=(8, 0))
 
         actions = ctk.CTkFrame(header, fg_color="transparent")
         actions.grid(row=0, column=3, sticky="e", padx=(10, 8))
@@ -701,6 +712,22 @@ class PaymentsPage(ctk.CTkFrame):
             return None
         return room_no
 
+    @staticmethod
+    def _parse_filter_date(text: str) -> date | None:
+        raw = (text or "").strip()
+        if not raw:
+            return None
+        try:
+            return date.fromisoformat(raw)
+        except ValueError:
+            return None
+
+    def _paid_at_range(self) -> tuple[date | None, date | None]:
+        return (
+            self._parse_filter_date(self.paid_from_var.get()),
+            self._parse_filter_date(self.paid_to_var.get()),
+        )
+
     def _filtered_payments(self):
         payments = self.services.payments.list_all(  # type: ignore[union-attr]
             self._current_project_id(), fee_type=self.fee_type
@@ -708,6 +735,13 @@ class PaymentsPage(ctk.CTkFrame):
         room_no = self._current_room_no()
         if room_no is not None:
             payments = [p for p in payments if p.room_no == room_no]
+        paid_from, paid_to = self._paid_at_range()
+        if paid_from is not None and paid_to is not None and paid_from > paid_to:
+            paid_from, paid_to = paid_to, paid_from
+        if paid_from is not None:
+            payments = [p for p in payments if p.paid_at >= paid_from]
+        if paid_to is not None:
+            payments = [p for p in payments if p.paid_at <= paid_to]
         return payments
 
     def _payment_period_label(self, payment) -> str:

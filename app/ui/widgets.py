@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import tkinter as tk
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from tkinter import font as tkfont
 from tkinter import ttk
 from typing import Callable, Optional, Sequence, Union
@@ -13,6 +13,215 @@ from app.ui.utils import center_window, is_decimal_input
 
 # 免租期 / 折减列表可视约 3 行（单行含控件与间距约 40px）
 PERIOD_LIST_VIEW_HEIGHT = 120
+
+
+def _make_hidden_popup(master: tk.Misc) -> tk.Toplevel:
+    """创建已隐藏的原生 Toplevel，避免 CTkToplevel 默认 200x200 方块闪跳。"""
+    win = tk.Toplevel(master)
+    # 先透明再隐藏，缩短 macOS 上创建瞬间的可见窗口
+    try:
+        win.attributes("-alpha", 0.0)
+    except tk.TclError:
+        pass
+    win.withdraw()
+    win.geometry("1x1+-8000+-8000")
+    win.transient(master.winfo_toplevel())
+    win.overrideredirect(True)
+    win.configure(bg="#ffffff")
+    return win
+
+
+def _show_hidden_popup(
+    win: tk.Toplevel,
+    anchor: tk.Misc,
+    *,
+    width: int,
+    height: int,
+    modal: bool = True,
+) -> None:
+    """布局完成后再显示（先 alpha=0，就位后恢复）。
+
+    modal=False 时不 grab，便于点面板外关闭（类 antd 下拉）。
+    """
+    try:
+        win.update_idletasks()
+    except tk.TclError:
+        pass
+    ax = anchor.winfo_rootx()
+    ay = anchor.winfo_rooty() + anchor.winfo_height() + 4
+    screen_w = win.winfo_screenwidth()
+    screen_h = win.winfo_screenheight()
+    x = min(max(0, ax), max(0, screen_w - width))
+    y = ay
+    if y + height > screen_h - 8:
+        y = max(0, anchor.winfo_rooty() - height - 4)
+    win.geometry(f"{width}x{height}+{int(x)}+{int(y)}")
+    win.deiconify()
+    win.lift()
+    try:
+        win.attributes("-alpha", 1.0)
+    except tk.TclError:
+        pass
+    if modal:
+        try:
+            win.grab_set()
+        except tk.TclError:
+            pass
+    try:
+        win.focus_force()
+    except tk.TclError:
+        pass
+
+
+def _bind_popover_dismiss(
+    panel: tk.Misc,
+    anchor: tk.Misc,
+    on_close: Callable[[], None],
+) -> Callable[[], None]:
+    """点击浮层/锚点外区域，或按 Esc 关闭。返回可安全重复调用的关闭函数。"""
+    root = anchor.winfo_toplevel()
+    alive = {"yes": True}
+    listening = {"yes": False}
+
+    def dismiss(_event=None) -> None:
+        if not alive["yes"]:
+            return
+        alive["yes"] = False
+        on_close()
+
+    def _inside_panel(event: tk.Event) -> bool:
+        try:
+            px = int(panel.winfo_rootx())
+            py = int(panel.winfo_rooty())
+            pw = int(panel.winfo_width())
+            ph = int(panel.winfo_height())
+            return px <= int(event.x_root) <= px + pw and py <= int(event.y_root) <= py + ph
+        except (tk.TclError, ValueError, TypeError):
+            return False
+
+    def _inside_anchor(event: tk.Event) -> bool:
+        try:
+            ax = int(anchor.winfo_rootx())
+            ay = int(anchor.winfo_rooty())
+            aw = int(anchor.winfo_width())
+            ah = int(anchor.winfo_height())
+            return ax <= int(event.x_root) <= ax + aw and ay <= int(event.y_root) <= ay + ah
+        except (tk.TclError, ValueError, TypeError):
+            return False
+
+    def on_press(event: tk.Event) -> None:
+        if not alive["yes"] or not listening["yes"]:
+            return
+        if _inside_panel(event) or _inside_anchor(event):
+            return
+        dismiss()
+
+    root.bind_all("<ButtonPress-1>", on_press, add="+")
+    root.bind_all("<Escape>", dismiss, add="+")
+    try:
+        panel.bind("<Escape>", dismiss)
+    except tk.TclError:
+        pass
+    # 避开打开面板的那次点击，下一拍再开始监听外部关闭
+    root.after(50, lambda: listening.__setitem__("yes", True))
+    return dismiss
+
+
+# 缓存可用的日历 locale，避免每次创建时反复失败重试
+_CALENDAR_LOCALE: str | None = None
+_CALENDAR_LOCALE_READY = False
+_TOOLTIP_PATCHED = False
+
+
+def _patch_calendar_tooltip_flash() -> None:
+    """tkcalendar 的 Tooltip 是 Toplevel，创建时会闪出小方块；先隐藏再初始化。"""
+    global _TOOLTIP_PATCHED
+    if _TOOLTIP_PATCHED:
+        return
+    from tkcalendar.tooltip import Tooltip
+
+    def __init__(self, parent, **kwargs) -> None:  # noqa: N807
+        tk.Toplevel.__init__(self, parent, padx=0, pady=0)
+        # 必须先 withdraw，否则 update_idletasks 会把小窗画到主界面上
+        self.withdraw()
+        try:
+            self.attributes("-alpha", 0.0)
+        except tk.TclError:
+            pass
+        self.transient(parent)
+        self.overrideredirect(True)
+        import sys as _sys
+
+        try:
+            self.attributes("-alpha", kwargs.pop("alpha", 0.8))
+        except tk.TclError:
+            kwargs.pop("alpha", None)
+        if _sys.platform == "linux":
+            try:
+                self.attributes("-type", "tooltip")
+            except tk.TclError:
+                pass
+        if not Tooltip._initialized:
+            style = ttk.Style(self)
+            style.configure(
+                "tooltip.TLabel",
+                foreground="gray90",
+                background="black",
+                font="TkDefaultFont 9 bold",
+            )
+            Tooltip._initialized = True
+        kw = {"compound": "left", "style": "tooltip.TLabel", "padding": 4}
+        kw.update(kwargs)
+        self.label = ttk.Label(self, **kw)
+        self.label.pack(fill="both")
+        self.config = self.configure
+
+    Tooltip.__init__ = __init__  # type: ignore[method-assign]
+    _TOOLTIP_PATCHED = True
+
+
+def _silence_calendar_tooltip(cal: Calendar) -> None:
+    """范围标记不需要事件 tooltip，彻底禁止显示以免再闪方块。"""
+    tw = getattr(cal, "tooltip_wrapper", None)
+    if tw is None:
+        return
+    tip = getattr(tw, "tooltip", None)
+    if tip is not None:
+        try:
+            tip.withdraw()
+            tip.attributes("-alpha", 0.0)
+            tip.geometry("1x1+-8000+-8000")
+        except tk.TclError:
+            pass
+    tw.display_tooltip = lambda: None  # type: ignore[method-assign]
+    tw._on_enter = lambda _event=None: None  # type: ignore[method-assign]
+
+
+def _create_calendar(**cal_kwargs) -> Calendar:
+    """创建日历；缓存可用 locale，避免重复失败重试。"""
+    global _CALENDAR_LOCALE, _CALENDAR_LOCALE_READY
+    _patch_calendar_tooltip_flash()
+    if _CALENDAR_LOCALE_READY:
+        if _CALENDAR_LOCALE:
+            cal = Calendar(locale=_CALENDAR_LOCALE, **cal_kwargs)
+        else:
+            cal = Calendar(**cal_kwargs)
+        _silence_calendar_tooltip(cal)
+        return cal
+    for locale_name in ("zh_CN", "zh_Hans_CN", "zh"):
+        try:
+            cal = Calendar(locale=locale_name, **cal_kwargs)
+            _CALENDAR_LOCALE = locale_name
+            _CALENDAR_LOCALE_READY = True
+            _silence_calendar_tooltip(cal)
+            return cal
+        except Exception:
+            continue
+    _CALENDAR_LOCALE = None
+    _CALENDAR_LOCALE_READY = True
+    cal = Calendar(**cal_kwargs)
+    _silence_calendar_tooltip(cal)
+    return cal
 
 
 class DecimalEntry(ctk.CTkEntry):
@@ -129,7 +338,7 @@ class TimePickerField(ctk.CTkFrame):
 
 
 class DatePickerField(ctk.CTkFrame):
-    """日期输入框：可手动输入，也可弹出日历选择。"""
+    """日期回显框：点击输入框弹出日历选择。"""
 
     def __init__(
         self,
@@ -137,65 +346,131 @@ class DatePickerField(ctk.CTkFrame):
         textvariable: Optional[tk.StringVar] = None,
         allow_empty: bool = False,
         placeholder: str = "YYYY-MM-DD",
+        command: Optional[Callable[[], None]] = None,
+        show_clear: Optional[bool] = None,
+        entry_width: int | None = None,
+        min_date_getter: Optional[Callable[[], Optional[date]]] = None,
+        max_date_getter: Optional[Callable[[], Optional[date]]] = None,
         **kwargs,
     ) -> None:
         super().__init__(master, fg_color="transparent", **kwargs)
         self.allow_empty = allow_empty
+        self._command = command
+        self._min_date_getter = min_date_getter
+        self._max_date_getter = max_date_getter
+        self._picker_open = False
         self.var = textvariable or ctk.StringVar(value="")
         self.grid_columnconfigure(0, weight=1)
 
-        self.entry = ctk.CTkEntry(
-            self, textvariable=self.var, placeholder_text=placeholder
-        )
+        entry_kwargs: dict = {
+            "textvariable": self.var,
+            "placeholder_text": placeholder,
+        }
+        if entry_width is not None:
+            entry_kwargs["width"] = entry_width
+        self.entry = ctk.CTkEntry(self, **entry_kwargs)
         self.entry.grid(row=0, column=0, sticky="ew")
-        self.pick_btn = ctk.CTkButton(
-            self, text="选择", width=56, command=self._open_picker
-        )
-        self.pick_btn.grid(row=0, column=1, padx=(8, 0))
-        if allow_empty:
+        self.entry.configure(state="readonly")
+        self._bind_entry_open(self.entry)
+        if show_clear is None:
+            show_clear = allow_empty
+        if show_clear:
             self.clear_btn = ctk.CTkButton(
                 self,
                 text="清空",
                 width=56,
                 fg_color="#6b7280",
-                command=lambda: self.var.set(""),
+                command=self._clear,
             )
-            self.clear_btn.grid(row=0, column=2, padx=(6, 0))
+            self.clear_btn.grid(row=0, column=1, padx=(8, 0))
+
+    def _bind_entry_open(self, entry: ctk.CTkEntry) -> None:
+        def open_picker(_event=None):
+            self.after_idle(self._open_picker)
+            return "break"
+
+        entry.bind("<Button-1>", open_picker)
+        try:
+            entry.configure(cursor="hand2")
+        except Exception:
+            pass
+        # CTk 内部 tk Entry 也绑定，确保点击命中
+        inner = getattr(entry, "_entry", None)
+        if inner is not None:
+            inner.bind("<Button-1>", open_picker)
+            try:
+                inner.configure(cursor="hand2", state="readonly")
+            except Exception:
+                pass
+
+    def _clear(self) -> None:
+        self.entry.configure(state="normal")
+        self.var.set("")
+        self.entry.configure(state="readonly")
+        self._notify()
+
+    def _notify(self) -> None:
+        if self._command is not None:
+            self._command()
 
     def get(self) -> str:
         return self.var.get().strip()
 
     def set(self, value: Union[str, date, None]) -> None:
+        self.entry.configure(state="normal")
         if value in (None, ""):
             self.var.set("")
-            return
-        if isinstance(value, date):
+        elif isinstance(value, date):
             self.var.set(value.isoformat())
-            return
-        self.var.set(str(value))
+        else:
+            self.var.set(str(value))
+        self.entry.configure(state="readonly")
+
+    @staticmethod
+    def _parse_optional(text: str) -> Optional[date]:
+        raw = (text or "").strip()
+        if not raw:
+            return None
+        try:
+            return date.fromisoformat(raw)
+        except ValueError:
+            return None
 
     def _parse_current(self) -> date:
-        text = self.get()
-        if text:
-            try:
-                return date.fromisoformat(text)
-            except ValueError:
-                pass
+        parsed = self._parse_optional(self.get())
+        if parsed is not None:
+            return parsed
         return date.today()
 
+    def _bound_dates(self) -> tuple[Optional[date], Optional[date]]:
+        min_d = self._min_date_getter() if self._min_date_getter else None
+        max_d = self._max_date_getter() if self._max_date_getter else None
+        return min_d, max_d
+
     def _open_picker(self) -> None:
+        if self._picker_open:
+            return
+        self._picker_open = True
         current = self._parse_current()
-        popup = ctk.CTkToplevel(self)
-        popup.title("选择日期")
-        popup.resizable(False, False)
-        popup.transient(self.winfo_toplevel())
-        popup.withdraw()
-        popup.geometry("320x340")
-        center_window(popup, 320, 340)
-        popup.deiconify()
-        popup.grab_set()
-        popup.lift()
-        popup.focus_force()
+        min_d, max_d = self._bound_dates()
+        if min_d is not None and current < min_d:
+            current = min_d
+        if max_d is not None and current > max_d:
+            current = max_d
+        popup_win = _make_hidden_popup(self)
+        popup = tk.Frame(popup_win, bg="#ffffff", highlightthickness=0)
+        popup.pack(fill="both", expand=True)
+
+        def _destroy() -> None:
+            self._picker_open = False
+            try:
+                popup_win.grab_release()
+            except Exception:
+                pass
+            try:
+                popup_win.destroy()
+            except Exception:
+                pass
 
         # 优先中文 locale；不可用时回退，避免打包环境缺语言包导致弹窗失败
         cal_kwargs = dict(
@@ -207,30 +482,455 @@ class DatePickerField(ctk.CTkFrame):
             date_pattern="yyyy-mm-dd",
             showweeknumbers=False,
         )
-        cal = None
-        for locale_name in ("zh_CN", "zh_Hans_CN", "zh"):
-            try:
-                cal = Calendar(locale=locale_name, **cal_kwargs)
-                break
-            except Exception:
-                cal = None
-        if cal is None:
-            cal = Calendar(**cal_kwargs)
+        if min_d is not None:
+            cal_kwargs["mindate"] = min_d
+        if max_d is not None:
+            cal_kwargs["maxdate"] = max_d
+        cal = _create_calendar(**cal_kwargs)
         cal.pack(fill="both", expand=True, padx=12, pady=(12, 8))
 
         def confirm() -> None:
             selected = cal.selection_get()
             if isinstance(selected, datetime):
                 selected = selected.date()
-            self.var.set(selected.isoformat())
-            popup.destroy()
+            if min_d is not None and selected < min_d:
+                selected = min_d
+            if max_d is not None and selected > max_d:
+                selected = max_d
+            self.set(selected.isoformat())
+            dismiss()
+            self._notify()
 
         bar = ctk.CTkFrame(popup, fg_color="transparent")
         bar.pack(fill="x", padx=12, pady=(0, 12))
+        dismiss = _bind_popover_dismiss(popup_win, self, _destroy)
         ctk.CTkButton(
-            bar, text="取消", width=80, fg_color="#6b7280", command=popup.destroy
+            bar, text="取消", width=80, fg_color="#6b7280", command=dismiss
         ).pack(side="right", padx=(8, 0))
         ctk.CTkButton(bar, text="确定", width=80, command=confirm).pack(side="right")
+        _show_hidden_popup(popup_win, self, width=320, height=340)
+
+
+class DateRangeField(ctk.CTkFrame):
+    """类 Ant Design RangePicker：点击起/止回显框，双月面板点选范围。"""
+
+    def __init__(
+        self,
+        master: tk.Misc,
+        startvariable: Optional[tk.StringVar] = None,
+        endvariable: Optional[tk.StringVar] = None,
+        start_placeholder: str = "开始日期",
+        end_placeholder: str = "结束日期",
+        command: Optional[Callable[[], None]] = None,
+        entry_width: int = 96,
+        allow_empty: bool = True,
+        **kwargs,
+    ) -> None:
+        super().__init__(master, fg_color=("gray92", "gray20"), corner_radius=6, **kwargs)
+        self._command = command
+        self.allow_empty = allow_empty
+        self._picker_open = False
+        self._start_placeholder = start_placeholder
+        self._end_placeholder = end_placeholder
+        self.start_var = startvariable or ctk.StringVar(value="")
+        self.end_var = endvariable or ctk.StringVar(value="")
+
+        inner = ctk.CTkFrame(self, fg_color="transparent")
+        inner.pack(fill="x", padx=4, pady=2)
+
+        # 固定槽宽：占位与 YYYY-MM-DD 切换时外框宽度不变
+        self.start_label = self._make_fixed_date_label(
+            inner, start_placeholder, entry_width
+        )
+        ctk.CTkLabel(inner, text="~", text_color="#9ca3af", width=16).pack(side="left")
+        self.end_label = self._make_fixed_date_label(
+            inner, end_placeholder, entry_width
+        )
+        self._bind_label_open(self.start_label, "start")
+        self._bind_label_open(self.end_label, "end")
+        self._refresh_display()
+        if allow_empty:
+            ctk.CTkButton(
+                inner,
+                text="×",
+                width=28,
+                height=24,
+                fg_color="transparent",
+                text_color="#6b7280",
+                hover_color=("gray85", "gray30"),
+                command=self._clear,
+            ).pack(side="left", padx=(2, 0))
+
+    @staticmethod
+    def _make_fixed_date_label(
+        master: tk.Misc, placeholder: str, width: int
+    ) -> ctk.CTkLabel:
+        slot = ctk.CTkFrame(
+            master, width=width, height=28, fg_color="transparent", corner_radius=0
+        )
+        slot.pack(side="left")
+        slot.pack_propagate(False)
+        label = ctk.CTkLabel(
+            slot,
+            text=placeholder,
+            anchor="center",
+            text_color="#9ca3af",
+            font=ctk.CTkFont(size=13),
+            cursor="hand2",
+            fg_color="transparent",
+        )
+        label.pack(fill="both", expand=True)
+        return label
+
+    def _bind_label_open(self, label: ctk.CTkLabel, side: str) -> None:
+        def open_picker(_event=None, which: str = side):
+            self.after_idle(lambda: self._open_range_picker(active=which))
+            return "break"
+
+        label.bind("<Button-1>", open_picker)
+
+    def _refresh_display(self) -> None:
+        start = self.start_var.get().strip()
+        end = self.end_var.get().strip()
+        if start:
+            self.start_label.configure(text=start, text_color=("#111827", "#e5e7eb"))
+        else:
+            self.start_label.configure(
+                text=self._start_placeholder, text_color="#9ca3af"
+            )
+        if end:
+            self.end_label.configure(text=end, text_color=("#111827", "#e5e7eb"))
+        else:
+            self.end_label.configure(text=self._end_placeholder, text_color="#9ca3af")
+
+    def _set_readonly_values(self, start: str, end: str) -> None:
+        self.start_var.set(start)
+        self.end_var.set(end)
+        self._refresh_display()
+
+    def _notify(self) -> None:
+        if self._command is not None:
+            self._command()
+
+    def _clear(self) -> None:
+        self._set_readonly_values("", "")
+        self._notify()
+
+    @staticmethod
+    def _parse_optional(text: str) -> Optional[date]:
+        raw = (text or "").strip()
+        if not raw:
+            return None
+        try:
+            return date.fromisoformat(raw)
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _shift_month(d: date, months: int) -> date:
+        from calendar import monthrange
+
+        month = d.month - 1 + months
+        year = d.year + month // 12
+        month = month % 12 + 1
+        day = min(d.day, monthrange(year, month)[1])
+        return date(year, month, day)
+
+    def get_range(self) -> tuple[Optional[date], Optional[date]]:
+        start = self._parse_optional(self.start_var.get())
+        end = self._parse_optional(self.end_var.get())
+        if start is not None and end is not None and start > end:
+            start, end = end, start
+        return start, end
+
+    def _make_calendar(self, master: tk.Misc, current: date) -> Calendar:
+        cal_kwargs = dict(
+            master=master,
+            selectmode="day",
+            year=current.year,
+            month=current.month,
+            date_pattern="yyyy-mm-dd",
+            showweeknumbers=False,
+            showothermonthdays=False,
+            font=("PingFang SC", 12),
+            background="white",
+            foreground="#1f2937",
+            headersbackground="#fafafa",
+            headersforeground="#6b7280",
+            selectbackground="#1677ff",
+            selectforeground="white",
+            normalbackground="white",
+            weekendbackground="#fafafa",
+            weekendforeground="#ef4444",
+            othermonthforeground="#d1d5db",
+            othermonthbackground="white",
+            bordercolor="#f0f0f0",
+            borderwidth=0,
+            cursor="hand2",
+        )
+        return _create_calendar(**cal_kwargs)
+
+    def _open_range_picker(self, active: str = "start") -> None:
+        del active  # 打开即清空重选，不再区分起/止入口
+        if self._picker_open:
+            return
+        self._picker_open = True
+        start0 = self._parse_optional(self.start_var.get())
+        end0 = self._parse_optional(self.end_var.get())
+        if start0 is not None and end0 is not None and start0 > end0:
+            start0, end0 = end0, start0
+        # 打开即清空原选择，重新点选；取消时再还原
+        original = (
+            start0.isoformat() if start0 else "",
+            end0.isoformat() if end0 else "",
+        )
+        self._set_readonly_values("", "")
+        focus = start0 or end0 or date.today()
+        left_month = date(focus.year, focus.month, 1)
+        right_month = self._shift_month(left_month, 1)
+
+        popup_win = _make_hidden_popup(self)
+        popup = tk.Frame(popup_win, bg="#ffffff", highlightthickness=0)
+        popup.pack(fill="both", expand=True)
+        committed = {"yes": False}
+
+        def _destroy() -> None:
+            self._picker_open = False
+            if not committed["yes"]:
+                self._set_readonly_values(original[0], original[1])
+            try:
+                popup_win.grab_release()
+            except Exception:
+                pass
+            try:
+                popup_win.destroy()
+            except Exception:
+                pass
+
+        dismiss = _bind_popover_dismiss(popup_win, self, _destroy)
+
+        # 主体：双月（全部用原生 tk，避免 CTk 控件在 Toplevel 上画出主页面小方块）
+        body = tk.Frame(popup, bg="#ffffff")
+        body.pack(fill="both", expand=True, padx=10, pady=(10, 4))
+        body.grid_columnconfigure(0, weight=1)
+        body.grid_columnconfigure(2, weight=1)
+        body.grid_rowconfigure(0, weight=1)
+
+        left_card = tk.Frame(
+            body,
+            width=320,
+            height=300,
+            bg="#ffffff",
+            highlightbackground="#e5e7eb",
+            highlightthickness=1,
+            bd=0,
+        )
+        left_card.grid_propagate(False)
+        left_card.grid(row=0, column=0, sticky="nsew", padx=(4, 4), pady=4)
+        divider = tk.Frame(body, width=1, bg="#f0f0f0")
+        divider.grid(row=0, column=1, sticky="ns", pady=12)
+        right_card = tk.Frame(
+            body,
+            width=320,
+            height=300,
+            bg="#ffffff",
+            highlightbackground="#e5e7eb",
+            highlightthickness=1,
+            bd=0,
+        )
+        right_card.grid_propagate(False)
+        right_card.grid(row=0, column=2, sticky="nsew", padx=(4, 4), pady=4)
+
+        title_font = ("PingFang SC", 14, "bold")
+        left_title = tk.Label(
+            left_card,
+            text=f"{left_month.year}年{left_month.month}月",
+            bg="#ffffff",
+            fg="#111827",
+            font=title_font,
+        )
+        left_title.pack(pady=(10, 2))
+        right_title = tk.Label(
+            right_card,
+            text=f"{right_month.year}年{right_month.month}月",
+            bg="#ffffff",
+            fg="#111827",
+            font=title_font,
+        )
+        right_title.pack(pady=(10, 2))
+
+        cal_left = self._make_calendar(left_card, left_month)
+        cal_right = self._make_calendar(right_card, right_month)
+        cal_left.pack(fill="both", expand=True, padx=8, pady=(0, 10))
+        cal_right.pack(fill="both", expand=True, padx=8, pady=(0, 10))
+
+        for cal in (cal_left, cal_right):
+            cal.tag_config("range", background="#91caff", foreground="#003eb3")
+            cal.tag_config("range_edge", background="#1677ff", foreground="#ffffff")
+            try:
+                cal.selection_clear()
+            except Exception:
+                pass
+
+        syncing = {"lock": False}
+        months = {"left": left_month, "right": right_month}
+
+        def refresh_titles() -> None:
+            lm, ly = cal_left.get_displayed_month()
+            rm, ry = cal_right.get_displayed_month()
+            # get_displayed_month -> (month, year)
+            left_title.configure(text=f"{ly}年{lm}月")
+            right_title.configure(text=f"{ry}年{rm}月")
+            months["left"] = date(ly, lm, 1)
+            months["right"] = date(ry, rm, 1)
+
+        def show_months(left: date) -> None:
+            syncing["lock"] = True
+            try:
+                right = self._shift_month(left, 1)
+                cal_left.see(left)
+                cal_right.see(right)
+                refresh_titles()
+                mark_range()
+            finally:
+                syncing["lock"] = False
+
+        def shift(delta: int) -> None:
+            show_months(self._shift_month(months["left"], delta))
+
+        nav_kwargs = dict(
+            relief="flat",
+            bg="#ffffff",
+            fg="#6b7280",
+            activebackground="#f3f4f6",
+            activeforeground="#111827",
+            bd=0,
+            highlightthickness=0,
+            cursor="hand2",
+            font=("PingFang SC", 14),
+            padx=4,
+            pady=0,
+        )
+        tk.Button(left_card, text="‹", command=lambda: shift(-1), **nav_kwargs).place(
+            relx=0.02, y=4, anchor="nw"
+        )
+        tk.Button(right_card, text="›", command=lambda: shift(1), **nav_kwargs).place(
+            relx=0.98, y=4, anchor="ne"
+        )
+
+        def on_month_changed(_event=None, source: str = "left") -> None:
+            if syncing["lock"]:
+                return
+            syncing["lock"] = True
+            try:
+                if source == "left":
+                    lm, ly = cal_left.get_displayed_month()
+                    left = date(ly, lm, 1)
+                    cal_right.see(self._shift_month(left, 1))
+                else:
+                    rm, ry = cal_right.get_displayed_month()
+                    right = date(ry, rm, 1)
+                    cal_left.see(self._shift_month(right, -1))
+                refresh_titles()
+                mark_range()
+            finally:
+                syncing["lock"] = False
+
+        cal_left.bind("<<CalendarMonthChanged>>", lambda e: on_month_changed(e, "left"))
+        cal_right.bind("<<CalendarMonthChanged>>", lambda e: on_month_changed(e, "right"))
+
+        # 每次打开都从空开始重新选起止
+        state: dict[str, object] = {
+            "start": None,
+            "end": None,
+            "picking_start": True,
+        }
+
+        def sync_external() -> None:
+            start = state["start"]
+            end = state["end"]
+            self._set_readonly_values(
+                start.isoformat() if isinstance(start, date) else "",
+                end.isoformat() if isinstance(end, date) else "",
+            )
+
+        def clear_marks() -> None:
+            for cal in (cal_left, cal_right):
+                try:
+                    for eid in list(cal.get_calevents()):
+                        cal.calevent_remove(eid)
+                except Exception:
+                    pass
+
+        def mark_range() -> None:
+            clear_marks()
+            start = state["start"]
+            end = state["end"]
+            assert start is None or isinstance(start, date)
+            assert end is None or isinstance(end, date)
+            sync_external()
+            if start is None:
+                return
+            if end is None:
+                for cal in (cal_left, cal_right):
+                    cal.calevent_create(start, "start", "range_edge")
+                return
+            if start > end:
+                start, end = end, start
+                state["start"], state["end"] = start, end
+                sync_external()
+            day = start
+            while day <= end:
+                tag = "range_edge" if day in (start, end) else "range"
+                for cal in (cal_left, cal_right):
+                    cal.calevent_create(day, "range", tag)
+                day += timedelta(days=1)
+
+        def apply_and_close() -> None:
+            start = state["start"]
+            end = state["end"]
+            if not isinstance(start, date):
+                return
+            if not isinstance(end, date):
+                end = start
+            if start > end:
+                start, end = end, start
+            committed["yes"] = True
+            self._set_readonly_values(start.isoformat(), end.isoformat())
+            dismiss()
+            self._notify()
+
+        def on_day_selected(_event=None, source: Calendar | None = None) -> None:
+            cal = source or cal_left
+            selected = cal.selection_get()
+            if selected is None:
+                return
+            if isinstance(selected, datetime):
+                selected = selected.date()
+            try:
+                cal.selection_clear()
+            except Exception:
+                pass
+            if state["picking_start"] or state["start"] is None:
+                state["start"] = selected
+                state["end"] = None
+                state["picking_start"] = False
+                mark_range()
+                return
+            start = state["start"]
+            assert isinstance(start, date)
+            end = selected
+            if end < start:
+                start, end = end, start
+            state["start"], state["end"] = start, end
+            mark_range()
+            popup.after(150, apply_and_close)
+
+        cal_left.bind("<<CalendarSelected>>", lambda e: on_day_selected(e, cal_left))
+        cal_right.bind("<<CalendarSelected>>", lambda e: on_day_selected(e, cal_right))
+        refresh_titles()
+        mark_range()
+        _show_hidden_popup(popup_win, self, width=680, height=340, modal=False)
 
 
 class FreePeriodsEditor(ctk.CTkFrame):
@@ -307,10 +1007,18 @@ class FreePeriodsEditor(ctk.CTkFrame):
             assert isinstance(end_var, ctk.StringVar)
             label = ctk.CTkLabel(self.list_frame, text=f"时段{idx + 1}", width=50)
             start_picker = DatePickerField(
-                self.list_frame, textvariable=start_var, placeholder="开始"
+                self.list_frame,
+                textvariable=start_var,
+                placeholder="开始",
+                max_date_getter=lambda v=end_var: DatePickerField._parse_optional(v.get()),
             )
             end_picker = DatePickerField(
-                self.list_frame, textvariable=end_var, placeholder="结束"
+                self.list_frame,
+                textvariable=end_var,
+                placeholder="结束",
+                min_date_getter=lambda v=start_var: DatePickerField._parse_optional(
+                    v.get()
+                ),
             )
 
             def make_remove(target_var: ctk.StringVar):
