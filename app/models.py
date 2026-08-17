@@ -4,6 +4,9 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Any, Optional
 
+# 项目名称、租户等短文本上限
+NAME_MAX_LENGTH = 100
+
 
 def _parse_date(value: Any) -> Optional[date]:
     if value in (None, ""):

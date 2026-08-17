@@ -5,7 +5,7 @@ from datetime import date, datetime
 import customtkinter as ctk
 
 from app.models import FEE_TYPE_DEPOSIT, FEE_TYPE_RENT
-from app.services import AppServices, ValidationError
+from app.services import AppServices
 from app.ui.utils import (
     ask_save_filename,
     ask_yes_no,
@@ -121,8 +121,8 @@ class PaymentFormDialog(FormDialog):
         self._summary_remaining_label.pack(side="left")
         self._summary_suffix_label.pack(side="left", fill="x", expand=True)
         self.add_field(3, "缴费起止", self.term_label)
-        self.add_field(4, "费用明细", summary_box)
-        self.add_field(5, "当次缴纳", DecimalEntry(self.body, textvariable=self.amount_var))
+        self.add_field(4, "费用明细（元）", summary_box)
+        self.add_field(5, "当次缴纳（元）", DecimalEntry(self.body, textvariable=self.amount_var))
         self.paid_at_picker = DatePickerField(self.body, textvariable=self.paid_at_var)
         self.add_field(6, "实缴日期", self.paid_at_picker)
         self.add_field(7, "备注", ctk.CTkEntry(self.body, textvariable=self.note_var))
@@ -453,7 +453,7 @@ class DepositFormDialog(FormDialog):
             self.body, textvariable=self.remaining_var, anchor="w", text_color="#b91c1c"
         )
         self.add_field(3, "剩余未收", self.remaining_label)
-        self.add_field(4, "当次缴纳", DecimalEntry(self.body, textvariable=self.amount_var))
+        self.add_field(4, "当次缴纳（元）", DecimalEntry(self.body, textvariable=self.amount_var))
         self.add_field(5, "实缴日期", DatePickerField(self.body, textvariable=self.paid_at_var))
         self.add_field(6, "备注", ctk.CTkEntry(self.body, textvariable=self.note_var))
         self._reload_summary(sync_amount=not self._keep_initial_amount)
@@ -601,7 +601,7 @@ class PaymentsPage(ctk.CTkFrame):
                 ("room", "房间", 70),
                 ("tenant", "租户", 100),
                 ("period", "缴费周期", 150),
-                ("amount", "缴纳金额", 90),
+                ("amount", "缴纳金额（元）", 120),
                 ("paid_at", "实缴日期", 90),
                 ("registered_at", "更新时间", 130),
                 ("note", "备注", 140),
@@ -815,7 +815,7 @@ class PaymentsPage(ctk.CTkFrame):
                     "租户",
                     "缴费起始",
                     "缴费结束",
-                    "缴纳金额",
+                    "缴纳金额（元）",
                     "实缴日期",
                     "更新时间",
                     "备注",
@@ -849,17 +849,15 @@ class PaymentsPage(ctk.CTkFrame):
         if not leases:
             show_info("请先创建生效中的租赁")
             return
-        if self.fee_type == FEE_TYPE_DEPOSIT:
-            data = DepositFormDialog(self, "登记押金", self.services, leases).show()
-        else:
-            data = PaymentFormDialog(self, "登记租金", self.services, leases).show()
-        if not data:
-            return
-        try:
+
+        def save(data: dict) -> None:
             self.services.payments.create(**data)  # type: ignore[union-attr]
             self.refresh()
-        except (ValidationError, ValueError) as exc:
-            show_error(str(exc))
+
+        if self.fee_type == FEE_TYPE_DEPOSIT:
+            DepositFormDialog(self, "登记押金", self.services, leases).show(on_submit=save)
+        else:
+            PaymentFormDialog(self, "登记租金", self.services, leases).show(on_submit=save)
 
     def edit_payment(self) -> None:
         payment_id = self._selected_id()
@@ -892,29 +890,8 @@ class PaymentsPage(ctk.CTkFrame):
             "paid_at": payment.paid_at.isoformat(),
             "note": payment.note,
         }
-        if payment.fee_type == FEE_TYPE_DEPOSIT:
-            data = DepositFormDialog(
-                self,
-                "编辑押金",
-                self.services,
-                leases,
-                initial,
-                lock_lease=True,
-                exclude_payment_id=payment_id,
-            ).show()
-        else:
-            data = PaymentFormDialog(
-                self,
-                "编辑租金",
-                self.services,
-                leases,
-                initial,
-                lock_lease=True,
-                exclude_payment_id=payment_id,
-            ).show()
-        if not data:
-            return
-        try:
+
+        def save(data: dict) -> None:
             self.services.payments.update(  # type: ignore[union-attr]
                 payment_id,
                 period_start=data["period_start"],
@@ -925,8 +902,27 @@ class PaymentsPage(ctk.CTkFrame):
                 fee_type=data.get("fee_type"),
             )
             self.refresh()
-        except (ValidationError, ValueError) as exc:
-            show_error(str(exc))
+
+        if payment.fee_type == FEE_TYPE_DEPOSIT:
+            DepositFormDialog(
+                self,
+                "编辑押金",
+                self.services,
+                leases,
+                initial,
+                lock_lease=True,
+                exclude_payment_id=payment_id,
+            ).show(on_submit=save)
+        else:
+            PaymentFormDialog(
+                self,
+                "编辑租金",
+                self.services,
+                leases,
+                initial,
+                lock_lease=True,
+                exclude_payment_id=payment_id,
+            ).show(on_submit=save)
 
     def delete_payment(self) -> None:
         payment_id = self._selected_id()

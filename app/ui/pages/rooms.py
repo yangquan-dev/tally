@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import customtkinter as ctk
 
-from app.services import AppServices, ValidationError
+from app.services import AppServices
 from app.ui.utils import ask_yes_no, format_decimal, parse_float, show_error, show_info
 from app.ui.widgets import DataTable, DecimalEntry, FormDialog
 
@@ -257,16 +257,14 @@ class RoomsPage(ctk.CTkFrame):
             project = self.services.projects.get(current)
             if project:
                 initial["project_name"] = project.name
-        data = RoomFormDialog(
-            self, "新建房间", projects, initial=initial, lock_project=current is not None
-        ).show()
-        if not data:
-            return
-        try:
+
+        def save(data: dict) -> None:
             self.services.rooms.create(**data)
             self.refresh()
-        except (ValidationError, ValueError) as exc:
-            show_error(str(exc))
+
+        RoomFormDialog(
+            self, "新建房间", projects, initial=initial, lock_project=current is not None
+        ).show(on_submit=save)
 
     def edit_room(self) -> None:
         room_id = self._selected_id()
@@ -278,7 +276,12 @@ class RoomsPage(ctk.CTkFrame):
             show_error("房间不存在")
             return
         projects = [(p.id, p.name) for p in self.services.projects.list_all()]
-        data = RoomFormDialog(
+
+        def save(data: dict) -> None:
+            self.services.rooms.update(room_id, data["room_no"], data["area"])
+            self.refresh()
+
+        RoomFormDialog(
             self,
             "编辑房间",
             projects,
@@ -288,14 +291,7 @@ class RoomsPage(ctk.CTkFrame):
                 "area": room.area,
             },
             lock_project=True,
-        ).show()
-        if not data:
-            return
-        try:
-            self.services.rooms.update(room_id, data["room_no"], data["area"])
-            self.refresh()
-        except (ValidationError, ValueError) as exc:
-            show_error(str(exc))
+        ).show(on_submit=save)
 
     def delete_room(self) -> None:
         room_id = self._selected_id()

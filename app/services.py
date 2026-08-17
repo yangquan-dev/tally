@@ -33,6 +33,7 @@ from app.models import (
     FreePeriod,
     Lease,
     LeaseDiscount,
+    NAME_MAX_LENGTH,
     PAYMENT_PERIOD_OPTIONS,
     Payment,
     Project,
@@ -57,6 +58,15 @@ from app.repositories import (
 
 class ValidationError(Exception):
     pass
+
+
+def _require_name(value: str, field: str, *, required: bool = True) -> str:
+    text = (value or "").strip()
+    if required and not text:
+        raise ValidationError(f"{field}不能为空")
+    if len(text) > NAME_MAX_LENGTH:
+        raise ValidationError(f"{field}不能超过{NAME_MAX_LENGTH}个字符")
+    return text
 
 
 def _add_months(d: date, months: int) -> date:
@@ -340,16 +350,10 @@ class ProjectService:
         return self.repo.get(project_id)
 
     def create(self, name: str) -> int:
-        name = name.strip()
-        if not name:
-            raise ValidationError("项目名称不能为空")
-        return self.repo.create(name)
+        return self.repo.create(_require_name(name, "项目名称"))
 
     def update(self, project_id: int, name: str) -> None:
-        name = name.strip()
-        if not name:
-            raise ValidationError("项目名称不能为空")
-        self.repo.update(project_id, name)
+        self.repo.update(project_id, _require_name(name, "项目名称"))
 
     def delete(self, project_id: int) -> None:
         self.repo.delete(project_id)
@@ -574,9 +578,7 @@ class LeaseService:
         | None = None,
         tenant: str = "",
     ) -> int:
-        tenant_name = (tenant or "").strip()
-        if not tenant_name:
-            raise ValidationError("租户不能为空")
+        tenant_name = _require_name(tenant, "租户")
         normalized, period, normalized_discounts = self._validate(
             room_id,
             deposit,
@@ -620,12 +622,12 @@ class LeaseService:
             raise ValidationError("租赁不存在")
         if status not in {"生效", "结束"}:
             raise ValidationError("租赁状态无效")
-        tenant_name = (
-            (tenant if tenant is not None else lease.tenant) or ""
-        ).strip()
+        tenant_name = _require_name(
+            (tenant if tenant is not None else lease.tenant) or "",
+            "租户",
+            required=status == "生效",
+        )
         # 生效合同必须填写租户；结束旧数据可保留空值以便兼容迁移
-        if status == "生效" and not tenant_name:
-            raise ValidationError("租户不能为空")
         periods = free_periods if free_periods is not None else (lease.free_periods or [])
         discount_items = (
             discounts if discounts is not None else (lease.discounts or [])

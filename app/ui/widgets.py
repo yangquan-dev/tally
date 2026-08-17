@@ -13,6 +13,12 @@ from app.ui.utils import center_window, is_decimal_input
 
 # 免租期 / 折减列表可视约 3 行（单行含控件与间距约 40px）
 PERIOD_LIST_VIEW_HEIGHT = 120
+PERIOD_LIST_BG = "#eef2f7"
+PERIOD_LIST_RADIUS = 8
+PERIOD_LIST_PAD_LEFT = 10
+# 表单标签列宽，与免租/折减行标签一致，使输入框与日期左缘对齐
+FORM_LABEL_WIDTH = 90
+FORM_LABEL_PADX = (0, 8)
 
 
 def _make_hidden_popup(master: tk.Misc) -> tk.Toplevel:
@@ -239,26 +245,54 @@ class DecimalEntry(ctk.CTkEntry):
         return is_decimal_input(proposed)
 
 
+def bind_entry_max_length(entry: ctk.CTkEntry, max_chars: int) -> None:
+    """限制输入框最多 max_chars 个字符（含粘贴）。"""
+
+    def _validate(proposed: str) -> bool:
+        return len(proposed) <= max_chars
+
+    vcmd = (entry.register(_validate), "%P")
+    entry.configure(validate="key", validatecommand=vcmd)
+
+
 def _period_list_frame(master: tk.Misc, grid_row: int) -> ctk.CTkScrollableFrame:
     """固定可视高度的时段列表。
 
     外层用 tk.Frame + grid_propagate(False) 锁高：嵌套在 CTkScrollableFrame
     弹窗内时，CTk 自身的 height 会被内容撑开，必须用 tk 容器约束。
+    内层圆角面板铺色，左侧留白 10px。
     """
     wrap = tk.Frame(
         master,
-        width=680,
+        width=520,
         height=PERIOD_LIST_VIEW_HEIGHT,
         highlightthickness=0,
         bd=0,
+        bg="gray92",
     )
     wrap.grid(row=grid_row, column=0, sticky="ew")
     wrap.grid_propagate(False)
 
-    list_frame = ctk.CTkScrollableFrame(
-        wrap, width=680, height=PERIOD_LIST_VIEW_HEIGHT
+    panel = ctk.CTkFrame(
+        wrap,
+        fg_color=PERIOD_LIST_BG,
+        corner_radius=PERIOD_LIST_RADIUS,
     )
-    list_frame.place(x=0, y=0, relwidth=1, relheight=1)
+    panel.place(x=0, y=0, relwidth=1, relheight=1)
+
+    list_frame = ctk.CTkScrollableFrame(
+        panel,
+        height=PERIOD_LIST_VIEW_HEIGHT,
+        corner_radius=0,
+        fg_color=PERIOD_LIST_BG,
+    )
+    list_frame.pack(fill="both", expand=True, padx=(PERIOD_LIST_PAD_LEFT, 0), pady=0)
+
+    def _sync_width(event: tk.Event) -> None:
+        if event.widget is master and event.width > 1:
+            wrap.configure(width=event.width, height=PERIOD_LIST_VIEW_HEIGHT)
+
+    master.bind("<Configure>", _sync_width, add="+")
     return list_frame
 
 
@@ -1138,6 +1172,7 @@ class FreePeriodsEditor(ctk.CTkFrame):
             self.list_frame,
             text="暂无免租期，可点击「添加时段」",
             text_color="#9ca3af",
+            fg_color="transparent",
         ).grid(row=0, column=0, columnspan=3, sticky="w", pady=8)
 
     def add_row(self, start: str = "", end: str = "") -> None:
@@ -1161,7 +1196,13 @@ class FreePeriodsEditor(ctk.CTkFrame):
             end_var = item["end_var"]
             assert isinstance(start_var, ctk.StringVar)
             assert isinstance(end_var, ctk.StringVar)
-            label = ctk.CTkLabel(self.list_frame, text=f"免租时段{idx + 1}", width=80)
+            label = ctk.CTkLabel(
+                self.list_frame,
+                text=f"免租时段{idx + 1}",
+                width=FORM_LABEL_WIDTH,
+                anchor="w",
+                fg_color="transparent",
+            )
             range_picker = DateRangeField(
                 self.list_frame,
                 startvariable=start_var,
@@ -1188,8 +1229,8 @@ class FreePeriodsEditor(ctk.CTkFrame):
                 fg_color="#b91c1c",
                 command=make_remove(start_var),
             )
-            label.grid(row=idx, column=0, padx=(0, 6), pady=4, sticky="w")
-            range_picker.grid(row=idx, column=1, padx=4, pady=4, sticky="w")
+            label.grid(row=idx, column=0, padx=FORM_LABEL_PADX, pady=4, sticky="w")
+            range_picker.grid(row=idx, column=1, padx=0, pady=4, sticky="w")
             remove_btn.grid(row=idx, column=2, padx=(6, 0), pady=4, sticky="e")
             rebuilt.append(
                 {
@@ -1407,7 +1448,13 @@ class DiscountAddDialog(ctk.CTkToplevel):
             self.result = rows
             self.destroy()
         except Exception as exc:  # noqa: BLE001
-            show_error(str(exc))
+            show_error(str(exc), parent=self)
+            try:
+                if self.winfo_exists():
+                    self.grab_set()
+                    self.lift()
+            except tk.TclError:
+                pass
 
     def show(self) -> list[tuple[date, date, str, str]] | None:
         self.wait_window()
@@ -1461,6 +1508,8 @@ class DiscountPeriodsEditor(ctk.CTkFrame):
             text="按起租日对齐的租赁月周期添加；立减不得超过该月周期应缴（非完整月按天折算）",
             text_color="#6b7280",
             anchor="w",
+            justify="left",
+            wraplength=500,
             font=ctk.CTkFont(size=12),
         ).grid(row=1, column=0, sticky="w", pady=(0, 6))
 
@@ -1578,6 +1627,7 @@ class DiscountPeriodsEditor(ctk.CTkFrame):
             self.list_frame,
             text="暂无折/减，可点击「添加月份」",
             text_color="#9ca3af",
+            fg_color="transparent",
         ).grid(row=0, column=0, columnspan=5, sticky="w", pady=8)
 
     def _rebuild(self) -> None:
@@ -1604,22 +1654,32 @@ class DiscountPeriodsEditor(ctk.CTkFrame):
             else:
                 period_text = start_text[:7] if start_text else "—"
             label = ctk.CTkLabel(
-                self.list_frame, text=f"折/减时段{idx + 1}", width=80
+                self.list_frame,
+                text=f"折/减时段{idx + 1}",
+                width=FORM_LABEL_WIDTH,
+                anchor="w",
+                fg_color="transparent",
             )
             month_label = ctk.CTkLabel(
-                self.list_frame, text=period_text, width=168, anchor="w"
-            )
-            kind_menu = ctk.CTkOptionMenu(
                 self.list_frame,
-                values=list(self.KIND_LABELS),
-                variable=kind_var,
+                text=period_text,
+                width=168,
+                anchor="w",
+                fg_color="transparent",
+            )
+            kind_label = ctk.CTkLabel(
+                self.list_frame,
+                text=kind_var.get(),
                 width=84,
+                anchor="w",
+                fg_color="transparent",
             )
-            value_entry = DecimalEntry(
+            value_label = ctk.CTkLabel(
                 self.list_frame,
-                textvariable=value_var,
-                placeholder_text="如 0.85 / 200",
+                text=value_var.get().strip() or "—",
                 width=100,
+                anchor="w",
+                fg_color="transparent",
             )
 
             def make_remove(target_var: ctk.StringVar):
@@ -1638,11 +1698,11 @@ class DiscountPeriodsEditor(ctk.CTkFrame):
                 fg_color="#b91c1c",
                 command=make_remove(start_var),
             )
-            label.grid(row=idx, column=0, padx=(0, 4), pady=4, sticky="w")
-            month_label.grid(row=idx, column=1, padx=2, pady=4, sticky="w")
-            kind_menu.grid(row=idx, column=2, padx=2, pady=4, sticky="w")
-            value_entry.grid(row=idx, column=3, padx=2, pady=4, sticky="ew")
-            remove_btn.grid(row=idx, column=4, padx=(4, 0), pady=4, sticky="e")
+            label.grid(row=idx, column=0, padx=FORM_LABEL_PADX, pady=4, sticky="w")
+            month_label.grid(row=idx, column=1, padx=0, pady=4, sticky="w")
+            kind_label.grid(row=idx, column=2, padx=(8, 0), pady=4, sticky="w")
+            value_label.grid(row=idx, column=3, padx=(8, 0), pady=4, sticky="ew")
+            remove_btn.grid(row=idx, column=4, padx=(8, 0), pady=4, sticky="e")
             rebuilt.append(
                 {
                     "start_var": start_var,
@@ -2273,13 +2333,12 @@ class DataTable(ctk.CTkFrame):
         return abs(int(width) - int(self._last_viewport_width)) >= 2
 
     def _apply_wraplengths(self) -> None:
-        """列宽变化后同步换行宽度，超长文本可折行。"""
-        for idx, cell in enumerate(self._header_cells):
-            wrap = self._col_wraplength(idx)
+        """列宽变化后同步换行宽度，超长文本可折行。表头始终单行，避免单位被折到下一行裁掉。"""
+        for cell in self._header_cells:
             for child in cell.winfo_children():
                 if isinstance(child, tk.Label):
                     try:
-                        child.configure(wraplength=wrap)
+                        child.configure(wraplength=0)
                     except tk.TclError:
                         pass
         for cells in self._row_widgets.values():
@@ -2743,6 +2802,7 @@ class FormDialog(ctk.CTkToplevel):
         height: int = 420,
         *,
         scrollable: bool = False,
+        label_width: int = 120,
     ) -> None:
         super().__init__(master)
         self.title(title)
@@ -2757,6 +2817,8 @@ class FormDialog(ctk.CTkToplevel):
             pass
         self._dialog_width = width
         self._dialog_height = height
+        self._label_width = label_width
+        self._on_submit: Optional[Callable[[dict], None]] = None
         self.geometry(f"{width}x{height}")
         self.result: Optional[dict] = None
 
@@ -2786,25 +2848,41 @@ class FormDialog(ctk.CTkToplevel):
             pass
 
     def add_field(self, row: int, label: str, widget: tk.Misc) -> None:
-        ctk.CTkLabel(self.body, text=label, anchor="w", width=120).grid(
-            row=row, column=0, sticky="w", pady=8, padx=(0, 8)
+        ctk.CTkLabel(self.body, text=label, anchor="w", width=self._label_width).grid(
+            row=row, column=0, sticky="w", pady=8, padx=FORM_LABEL_PADX
         )
         widget.grid(row=row, column=1, sticky="ew", pady=8)
 
+    def _restore_modal(self) -> None:
+        try:
+            if self.winfo_exists():
+                self.grab_set()
+                self.lift()
+                self.after(50, self._focus)
+        except tk.TclError:
+            pass
+
     def _on_ok(self) -> None:
         try:
-            self.result = self.collect()
+            data = self.collect()
+            if self._on_submit is not None:
+                self._on_submit(data)
+            self.result = data
         except Exception as exc:  # noqa: BLE001
             from app.ui.utils import show_error
 
-            show_error(str(exc))
+            show_error(str(exc), parent=self)
+            self._restore_modal()
             return
         self.destroy()
 
     def collect(self) -> dict:
         raise NotImplementedError
 
-    def show(self) -> Optional[dict]:
+    def show(
+        self, on_submit: Optional[Callable[[dict], None]] = None
+    ) -> Optional[dict]:
+        self._on_submit = on_submit
         center_window(self, self._dialog_width, self._dialog_height)
         self.deiconify()
         self.grab_set()

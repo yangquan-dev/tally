@@ -7,11 +7,12 @@ import customtkinter as ctk
 
 from app.models import (
     DEFAULT_PAYMENT_PERIOD,
+    NAME_MAX_LENGTH,
     PAYMENT_PERIOD_OPTIONS,
     Lease,
     Room,
 )
-from app.services import AppServices, ValidationError
+from app.services import AppServices
 from app.ui.utils import (
     ask_save_filename,
     ask_yes_no,
@@ -25,6 +26,7 @@ from app.ui.utils import (
     write_xlsx,
 )
 from app.ui.widgets import (
+    FORM_LABEL_WIDTH,
     DataTable,
     DatePickerField,
     DateRangeField,
@@ -32,6 +34,7 @@ from app.ui.widgets import (
     DiscountPeriodsEditor,
     FormDialog,
     FreePeriodsEditor,
+    bind_entry_max_length,
 )
 
 
@@ -45,7 +48,14 @@ class LeaseFormDialog(FormDialog):
         lock_room: bool = False,
         allow_status: bool = False,
     ) -> None:
-        super().__init__(master, title, width=760, height=720, scrollable=True)
+        super().__init__(
+            master,
+            title,
+            width=600,
+            height=720,
+            scrollable=True,
+            label_width=FORM_LABEL_WIDTH,
+        )
         initial = initial or {}
         self.rooms = rooms
         self.lock_room = lock_room
@@ -99,9 +109,11 @@ class LeaseFormDialog(FormDialog):
 
         self.add_field(0, "项目", self.project_menu)
         self.add_field(1, "房间", self.room_menu)
-        self.add_field(2, "租户", ctk.CTkEntry(self.body, textvariable=self.tenant_var))
-        self.add_field(3, "押金", DecimalEntry(self.body, textvariable=self.deposit_var))
-        self.add_field(4, "月租金", DecimalEntry(self.body, textvariable=self.rent_var))
+        tenant_entry = ctk.CTkEntry(self.body, textvariable=self.tenant_var)
+        bind_entry_max_length(tenant_entry, NAME_MAX_LENGTH)
+        self.add_field(2, "租户", tenant_entry)
+        self.add_field(3, "押金（元）", DecimalEntry(self.body, textvariable=self.deposit_var))
+        self.add_field(4, "月租金（元）", DecimalEntry(self.body, textvariable=self.rent_var))
         self.add_field(
             5,
             "缴费周期",
@@ -189,6 +201,8 @@ class LeaseFormDialog(FormDialog):
         tenant = self.tenant_var.get().strip()
         if not tenant:
             raise ValueError("租户不能为空")
+        if len(tenant) > NAME_MAX_LENGTH:
+            raise ValueError(f"租户不能超过{NAME_MAX_LENGTH}个字符")
         period = self.payment_period_var.get().strip()
         if not period:
             raise ValueError("缴费周期不能为空")
@@ -287,8 +301,8 @@ class LeasesPage(ctk.CTkFrame):
                 ("project", "项目", 110),
                 ("room", "房间", 70),
                 ("tenant", "租户", 100),
-                ("deposit", "押金", 88),
-                ("rent", "月租金", 88),
+                ("deposit", "押金（元）", 108),
+                ("rent", "月租金（元）", 116),
                 ("period", "缴费周期", 72),
                 ("term", "租期", 150),
                 ("free", "免租期", 150),
@@ -458,8 +472,8 @@ class LeasesPage(ctk.CTkFrame):
                     "项目",
                     "房间",
                     "租户",
-                    "押金",
-                    "月租金",
+                    "押金（元）",
+                    "月租金（元）",
                     "缴费周期",
                     "起租时间",
                     "到期时间",
@@ -497,10 +511,8 @@ class LeasesPage(ctk.CTkFrame):
         if not rooms:
             show_info("请先创建房间")
             return
-        data = LeaseFormDialog(self, "新建租赁", rooms).show()
-        if not data:
-            return
-        try:
+
+        def save(data: dict) -> None:
             self.services.leases.create(  # type: ignore[union-attr]
                 room_id=data["room_id"],
                 tenant=data["tenant"],
@@ -513,8 +525,8 @@ class LeasesPage(ctk.CTkFrame):
                 discounts=data["discounts"],
             )
             self.refresh()
-        except (ValidationError, ValueError) as exc:
-            show_error(str(exc))
+
+        LeaseFormDialog(self, "新建租赁", rooms).show(on_submit=save)
 
     def edit_lease(self) -> None:
         lease_id = self._selected_id()
@@ -539,7 +551,23 @@ class LeasesPage(ctk.CTkFrame):
             )
             for d in (lease.discounts or [])
         ]
-        data = LeaseFormDialog(
+
+        def save(data: dict) -> None:
+            self.services.leases.update(  # type: ignore[union-attr]
+                lease_id,
+                tenant=data["tenant"],
+                deposit=data["deposit"],
+                monthly_rent=data["monthly_rent"],
+                start_date=data["start_date"],
+                end_date=data["end_date"],
+                free_periods=data["free_periods"],
+                status=data["status"],
+                payment_period=data["payment_period"],
+                discounts=data["discounts"],
+            )
+            self.refresh()
+
+        LeaseFormDialog(
             self,
             "编辑租赁",
             rooms,
@@ -558,25 +586,7 @@ class LeasesPage(ctk.CTkFrame):
             },
             lock_room=True,
             allow_status=True,
-        ).show()
-        if not data:
-            return
-        try:
-            self.services.leases.update(  # type: ignore[union-attr]
-                lease_id,
-                tenant=data["tenant"],
-                deposit=data["deposit"],
-                monthly_rent=data["monthly_rent"],
-                start_date=data["start_date"],
-                end_date=data["end_date"],
-                free_periods=data["free_periods"],
-                status=data["status"],
-                payment_period=data["payment_period"],
-                discounts=data["discounts"],
-            )
-            self.refresh()
-        except (ValidationError, ValueError) as exc:
-            show_error(str(exc))
+        ).show(on_submit=save)
 
     def delete_lease(self) -> None:
         lease_id = self._selected_id()

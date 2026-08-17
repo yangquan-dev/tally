@@ -93,12 +93,32 @@ def parse_int(text: str, field_name: str = "数值") -> int:
         raise ValueError(f"{field_name}必须是整数") from exc
 
 
-def show_error(message: str) -> None:
-    messagebox.showerror("错误", message)
+def _message_parent(widget=None):
+    if widget is None:
+        return None
+    try:
+        top = widget.winfo_toplevel()
+        if top.winfo_exists():
+            return top
+    except Exception:
+        return None
+    return None
 
 
-def show_info(message: str) -> None:
-    messagebox.showinfo("提示", message)
+def show_error(message: str, parent=None) -> None:
+    top = _message_parent(parent)
+    if top is not None:
+        messagebox.showerror("错误", message, parent=top)
+    else:
+        messagebox.showerror("错误", message)
+
+
+def show_info(message: str, parent=None) -> None:
+    top = _message_parent(parent)
+    if top is not None:
+        messagebox.showinfo("提示", message, parent=top)
+    else:
+        messagebox.showinfo("提示", message)
 
 
 def ask_yes_no(message: str) -> bool:

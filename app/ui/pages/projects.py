@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import customtkinter as ctk
 
-from app.services import AppServices, ValidationError
+from app.models import NAME_MAX_LENGTH
+from app.services import AppServices
 from app.ui.utils import ask_yes_no, show_error, show_info
-from app.ui.widgets import DataTable, FormDialog
+from app.ui.widgets import DataTable, FormDialog, bind_entry_max_length
 
 
 class ProjectFormDialog(FormDialog):
@@ -14,6 +15,7 @@ class ProjectFormDialog(FormDialog):
         name = str(initial.get("name") or "").strip()
         self.name_var = ctk.StringVar(master=self, value=name)
         self.name_entry = ctk.CTkEntry(self.body, textvariable=self.name_var)
+        bind_entry_max_length(self.name_entry, NAME_MAX_LENGTH)
         self.add_field(0, "项目名称", self.name_entry)
         # 显式写入，避免部分环境下 StringVar 初值未同步到输入框
         if name:
@@ -22,7 +24,12 @@ class ProjectFormDialog(FormDialog):
             self.name_entry.insert(0, name)
 
     def collect(self) -> dict:
-        return {"name": self.name_var.get().strip()}
+        name = self.name_var.get().strip()
+        if not name:
+            raise ValueError("项目名称不能为空")
+        if len(name) > NAME_MAX_LENGTH:
+            raise ValueError(f"项目名称不能超过{NAME_MAX_LENGTH}个字符")
+        return {"name": name}
 
 
 class ProjectsPage(ctk.CTkFrame):
@@ -119,14 +126,11 @@ class ProjectsPage(ctk.CTkFrame):
         self.table.set_rows(rows, [str(p.id) for p in projects])
 
     def create_project(self) -> None:
-        data = ProjectFormDialog(self, "新建项目").show()
-        if not data:
-            return
-        try:
+        def save(data: dict) -> None:
             self.services.projects.create(**data)
             self.refresh()
-        except (ValidationError, ValueError) as exc:
-            show_error(str(exc))
+
+        ProjectFormDialog(self, "新建项目").show(on_submit=save)
 
     def edit_project(self) -> None:
         project_id = self._selected_id()
@@ -138,18 +142,16 @@ class ProjectsPage(ctk.CTkFrame):
             show_error("项目不存在")
             return
         name = (project.name or "").strip()
-        data = ProjectFormDialog(
+
+        def save(data: dict) -> None:
+            self.services.projects.update(project_id, **data)  # type: ignore[union-attr]
+            self.refresh()
+
+        ProjectFormDialog(
             self,
             "编辑项目",
             {"name": name},
-        ).show()
-        if not data:
-            return
-        try:
-            self.services.projects.update(project_id, **data)  # type: ignore[union-attr]
-            self.refresh()
-        except (ValidationError, ValueError) as exc:
-            show_error(str(exc))
+        ).show(on_submit=save)
 
     def delete_project(self) -> None:
         project_id = self._selected_id()

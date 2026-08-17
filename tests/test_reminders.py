@@ -653,6 +653,24 @@ class ReminderServiceTests(unittest.TestCase):
         ]
         self.assertEqual(deposit_items, [])
 
+    def test_project_name_rejects_over_100_chars(self) -> None:
+        with self.assertRaises(ValidationError):
+            self.services.projects.create("测" * 101)  # type: ignore[union-attr]
+        project_id = self.services.projects.create("测" * 100)  # type: ignore[union-attr]
+        with self.assertRaises(ValidationError):
+            self.services.projects.update(project_id, "x" * 101)  # type: ignore[union-attr]
+
+    def test_tenant_rejects_over_100_chars(self) -> None:
+        with self.assertRaises(ValidationError):
+            self.services.leases.create(  # type: ignore[union-attr]
+                tenant="户" * 101,
+                room_id=self.room_id,
+                deposit=1000,
+                monthly_rent=2000,
+                start_date=date(2045, 1, 1),
+                end_date=date(2045, 12, 31),
+            )
+
 
 class BootstrapConfigTests(unittest.TestCase):
     def test_storage_locked_after_set(self) -> None:
