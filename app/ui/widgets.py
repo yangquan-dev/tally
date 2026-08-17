@@ -109,12 +109,13 @@ def _bind_popover_dismiss(
         except (tk.TclError, ValueError, TypeError):
             return False
 
-    def on_press(event: tk.Event) -> None:
+    def on_press(event: tk.Event) -> str | None:
         if not alive["yes"] or not listening["yes"]:
-            return
+            return None
         if _inside_panel(event) or _inside_anchor(event):
-            return
+            return None
         dismiss()
+        return "break"
 
     root.bind_all("<ButtonPress-1>", on_press, add="+")
     root.bind_all("<Escape>", dismiss, add="+")
@@ -457,12 +458,27 @@ class DatePickerField(ctk.CTkFrame):
             current = min_d
         if max_d is not None and current > max_d:
             current = max_d
+        original = self.get()
+
+        # 表单弹窗若持有 grab，会挡住「点外部取消」；临时释放，关闭后再恢复
+        parent_top = self.winfo_toplevel()
+        prev_grab = parent_top.grab_current()
+        if prev_grab is not None:
+            try:
+                prev_grab.grab_release()
+            except tk.TclError:
+                pass
+
+        # 与双月选择器一致：原生 Toplevel + tkcalendar.Calendar（非模态，支持点外部取消）
         popup_win = _make_hidden_popup(self)
         popup = tk.Frame(popup_win, bg="#ffffff", highlightthickness=0)
         popup.pack(fill="both", expand=True)
+        committed = {"yes": False}
 
         def _destroy() -> None:
             self._picker_open = False
+            if not committed["yes"]:
+                self.set(original)
             try:
                 popup_win.grab_release()
             except Exception:
@@ -471,8 +487,15 @@ class DatePickerField(ctk.CTkFrame):
                 popup_win.destroy()
             except Exception:
                 pass
+            if prev_grab is not None:
+                try:
+                    if prev_grab.winfo_exists():
+                        prev_grab.grab_set()
+                except tk.TclError:
+                    pass
 
-        # 优先中文 locale；不可用时回退，避免打包环境缺语言包导致弹窗失败
+        dismiss = _bind_popover_dismiss(popup_win, self, _destroy)
+
         cal_kwargs = dict(
             master=popup,
             selectmode="day",
@@ -481,34 +504,48 @@ class DatePickerField(ctk.CTkFrame):
             day=current.day,
             date_pattern="yyyy-mm-dd",
             showweeknumbers=False,
+            font=("PingFang SC", 12),
+            background="white",
+            foreground="#1f2937",
+            headersbackground="#fafafa",
+            headersforeground="#6b7280",
+            selectbackground="#1677ff",
+            selectforeground="white",
+            normalbackground="white",
+            weekendbackground="#fafafa",
+            weekendforeground="#ef4444",
+            bordercolor="#f0f0f0",
+            borderwidth=0,
+            cursor="hand2",
         )
         if min_d is not None:
             cal_kwargs["mindate"] = min_d
         if max_d is not None:
             cal_kwargs["maxdate"] = max_d
         cal = _create_calendar(**cal_kwargs)
-        cal.pack(fill="both", expand=True, padx=12, pady=(12, 8))
+        cal.pack(fill="both", expand=True, padx=12, pady=12)
 
-        def confirm() -> None:
+        def apply_selected(_event=None) -> None:
             selected = cal.selection_get()
+            if selected is None:
+                return
             if isinstance(selected, datetime):
                 selected = selected.date()
             if min_d is not None and selected < min_d:
                 selected = min_d
             if max_d is not None and selected > max_d:
                 selected = max_d
+            committed["yes"] = True
             self.set(selected.isoformat())
             dismiss()
             self._notify()
 
-        bar = ctk.CTkFrame(popup, fg_color="transparent")
-        bar.pack(fill="x", padx=12, pady=(0, 12))
-        dismiss = _bind_popover_dismiss(popup_win, self, _destroy)
-        ctk.CTkButton(
-            bar, text="取消", width=80, fg_color="#6b7280", command=dismiss
-        ).pack(side="right", padx=(8, 0))
-        ctk.CTkButton(bar, text="确定", width=80, command=confirm).pack(side="right")
-        _show_hidden_popup(popup_win, self, width=320, height=340)
+        cal.bind("<<CalendarSelected>>", apply_selected)
+        _show_hidden_popup(popup_win, self, width=300, height=280, modal=False)
+        try:
+            cal.focus_set()
+        except tk.TclError:
+            pass
 
 
 class DateRangeField(ctk.CTkFrame):
@@ -522,7 +559,7 @@ class DateRangeField(ctk.CTkFrame):
         start_placeholder: str = "开始日期",
         end_placeholder: str = "结束日期",
         command: Optional[Callable[[], None]] = None,
-        entry_width: int = 96,
+        entry_width: int = 74,
         allow_empty: bool = True,
         **kwargs,
     ) -> None:
@@ -565,9 +602,7 @@ class DateRangeField(ctk.CTkFrame):
     def _make_fixed_date_label(
         master: tk.Misc, placeholder: str, width: int
     ) -> ctk.CTkLabel:
-        slot = ctk.CTkFrame(
-            master, width=width, height=28, fg_color="transparent", corner_radius=0
-        )
+        slot = tk.Frame(master, width=width, height=28, highlightthickness=0, bd=0)
         slot.pack(side="left")
         slot.pack_propagate(False)
         label = ctk.CTkLabel(
@@ -689,6 +724,14 @@ class DateRangeField(ctk.CTkFrame):
         left_month = date(focus.year, focus.month, 1)
         right_month = self._shift_month(left_month, 1)
 
+        parent_top = self.winfo_toplevel()
+        prev_grab = parent_top.grab_current()
+        if prev_grab is not None:
+            try:
+                prev_grab.grab_release()
+            except tk.TclError:
+                pass
+
         popup_win = _make_hidden_popup(self)
         popup = tk.Frame(popup_win, bg="#ffffff", highlightthickness=0)
         popup.pack(fill="both", expand=True)
@@ -706,6 +749,12 @@ class DateRangeField(ctk.CTkFrame):
                 popup_win.destroy()
             except Exception:
                 pass
+            if prev_grab is not None:
+                try:
+                    if prev_grab.winfo_exists():
+                        prev_grab.grab_set()
+                except tk.TclError:
+                    pass
 
         dismiss = _bind_popover_dismiss(popup_win, self, _destroy)
 
@@ -774,6 +823,22 @@ class DateRangeField(ctk.CTkFrame):
 
         syncing = {"lock": False}
         months = {"left": left_month, "right": right_month}
+        # 每次打开都从空开始重新选起止
+        state: dict[str, object] = {
+            "start": None,
+            "end": None,
+            "picking_start": True,
+            "anchor_side": None,
+        }
+
+        def any_date_selected() -> bool:
+            return isinstance(state["start"], date) or isinstance(state["end"], date)
+
+        def selected_month() -> date | None:
+            picked = state["start"] if isinstance(state["start"], date) else state["end"]
+            if not isinstance(picked, date):
+                return None
+            return date(picked.year, picked.month, 1)
 
         def refresh_titles() -> None:
             lm, ly = cal_left.get_displayed_month()
@@ -784,19 +849,56 @@ class DateRangeField(ctk.CTkFrame):
             months["left"] = date(ly, lm, 1)
             months["right"] = date(ry, rm, 1)
 
-        def show_months(left: date) -> None:
+        def update_nav_enabled() -> None:
+            sel_m = selected_month()
+            side = state["anchor_side"]
+            left_next_ok = True
+            right_prev_ok = True
+            if sel_m is not None and side == "left":
+                right_prev_ok = months["right"] > sel_m
+            elif sel_m is not None and side == "right":
+                left_next_ok = months["left"] < sel_m
+            left_next_btn.configure(state=("normal" if left_next_ok else "disabled"))
+            right_prev_btn.configure(state=("normal" if right_prev_ok else "disabled"))
+
+        def show_linked(left: date) -> None:
+            """未选日期时左右保持相邻月份并一起翻。"""
             syncing["lock"] = True
             try:
-                right = self._shift_month(left, 1)
                 cal_left.see(left)
-                cal_right.see(right)
+                cal_right.see(self._shift_month(left, 1))
                 refresh_titles()
                 mark_range()
+                update_nav_enabled()
             finally:
                 syncing["lock"] = False
 
-        def shift(delta: int) -> None:
-            show_months(self._shift_month(months["left"], delta))
+        def show_side(side: str, month: date) -> None:
+            """已有选中日期时只切换一侧。"""
+            sel_m = selected_month()
+            anchor = state["anchor_side"]
+            if sel_m is not None:
+                if side == "right" and anchor == "left" and month < sel_m:
+                    month = sel_m
+                if side == "left" and anchor == "right" and month > sel_m:
+                    month = sel_m
+            syncing["lock"] = True
+            try:
+                if side == "left":
+                    cal_left.see(month)
+                else:
+                    cal_right.see(month)
+                refresh_titles()
+                mark_range()
+                update_nav_enabled()
+            finally:
+                syncing["lock"] = False
+
+        def shift_side(side: str, delta: int) -> None:
+            if any_date_selected():
+                show_side(side, self._shift_month(months[side], delta))
+            else:
+                show_linked(self._shift_month(months["left"], delta))
 
         nav_kwargs = dict(
             relief="flat",
@@ -811,40 +913,72 @@ class DateRangeField(ctk.CTkFrame):
             padx=4,
             pady=0,
         )
-        tk.Button(left_card, text="‹", command=lambda: shift(-1), **nav_kwargs).place(
-            relx=0.02, y=4, anchor="nw"
+        left_prev_btn = tk.Button(
+            left_card, text="‹", command=lambda: shift_side("left", -1), **nav_kwargs
         )
-        tk.Button(right_card, text="›", command=lambda: shift(1), **nav_kwargs).place(
-            relx=0.98, y=4, anchor="ne"
+        left_prev_btn.place(relx=0.02, y=4, anchor="nw")
+        left_next_btn = tk.Button(
+            left_card, text="›", command=lambda: shift_side("left", 1), **nav_kwargs
         )
+        left_next_btn.place(relx=0.98, y=4, anchor="ne")
+        right_prev_btn = tk.Button(
+            right_card, text="‹", command=lambda: shift_side("right", -1), **nav_kwargs
+        )
+        right_prev_btn.place(relx=0.02, y=4, anchor="nw")
+        right_next_btn = tk.Button(
+            right_card, text="›", command=lambda: shift_side("right", 1), **nav_kwargs
+        )
+        right_next_btn.place(relx=0.98, y=4, anchor="ne")
+
+        def apply_date_bounds() -> None:
+            picked = state["start"] if isinstance(state["start"], date) else state["end"]
+            side = state["anchor_side"]
+            try:
+                if side == "left" and isinstance(picked, date):
+                    cal_right.configure(mindate=picked, maxdate=None)
+                    cal_left.configure(mindate=None, maxdate=None)
+                elif side == "right" and isinstance(picked, date):
+                    cal_left.configure(mindate=None, maxdate=picked)
+                    cal_right.configure(mindate=None, maxdate=None)
+                else:
+                    cal_left.configure(mindate=None, maxdate=None)
+                    cal_right.configure(mindate=None, maxdate=None)
+            except Exception:
+                pass
 
         def on_month_changed(_event=None, source: str = "left") -> None:
             if syncing["lock"]:
+                return
+            if any_date_selected():
+                refresh_titles()
+                sel_m = selected_month()
+                side = state["anchor_side"]
+                if sel_m is not None:
+                    if source == "right" and side == "left" and months["right"] < sel_m:
+                        show_side("right", sel_m)
+                        return
+                    if source == "left" and side == "right" and months["left"] > sel_m:
+                        show_side("left", sel_m)
+                        return
+                mark_range()
+                update_nav_enabled()
                 return
             syncing["lock"] = True
             try:
                 if source == "left":
                     lm, ly = cal_left.get_displayed_month()
-                    left = date(ly, lm, 1)
-                    cal_right.see(self._shift_month(left, 1))
+                    cal_right.see(self._shift_month(date(ly, lm, 1), 1))
                 else:
                     rm, ry = cal_right.get_displayed_month()
-                    right = date(ry, rm, 1)
-                    cal_left.see(self._shift_month(right, -1))
+                    cal_left.see(self._shift_month(date(ry, rm, 1), -1))
                 refresh_titles()
                 mark_range()
+                update_nav_enabled()
             finally:
                 syncing["lock"] = False
 
         cal_left.bind("<<CalendarMonthChanged>>", lambda e: on_month_changed(e, "left"))
         cal_right.bind("<<CalendarMonthChanged>>", lambda e: on_month_changed(e, "right"))
-
-        # 每次打开都从空开始重新选起止
-        state: dict[str, object] = {
-            "start": None,
-            "end": None,
-            "picking_start": True,
-        }
 
         def sync_external() -> None:
             start = state["start"]
@@ -869,11 +1003,17 @@ class DateRangeField(ctk.CTkFrame):
             assert start is None or isinstance(start, date)
             assert end is None or isinstance(end, date)
             sync_external()
-            if start is None:
+            if start is None and end is None:
                 return
-            if end is None:
+            if start is None and isinstance(end, date):
+                for cal in (cal_left, cal_right):
+                    cal.calevent_create(end, "end", "range_edge")
+                return
+            if end is None and isinstance(start, date):
                 for cal in (cal_left, cal_right):
                     cal.calevent_create(start, "start", "range_edge")
+                return
+            if start is None or end is None:
                 return
             if start > end:
                 start, end = end, start
@@ -911,18 +1051,34 @@ class DateRangeField(ctk.CTkFrame):
                 cal.selection_clear()
             except Exception:
                 pass
-            if state["picking_start"] or state["start"] is None:
-                state["start"] = selected
-                state["end"] = None
+            clicked = "left" if source is cal_left else "right"
+            if state["picking_start"] or (
+                state["start"] is None and state["end"] is None
+            ):
+                state["anchor_side"] = clicked
+                if clicked == "left":
+                    state["start"] = selected
+                    state["end"] = None
+                else:
+                    state["start"] = None
+                    state["end"] = selected
                 state["picking_start"] = False
+                apply_date_bounds()
                 mark_range()
+                update_nav_enabled()
                 return
-            start = state["start"]
-            assert isinstance(start, date)
-            end = selected
-            if end < start:
-                start, end = end, start
-            state["start"], state["end"] = start, end
+            if state["anchor_side"] == "left":
+                start = state["start"]
+                assert isinstance(start, date)
+                if selected < start:
+                    return
+                state["end"] = selected
+            else:
+                end = state["end"]
+                assert isinstance(end, date)
+                if selected > end:
+                    return
+                state["start"] = selected
             mark_range()
             popup.after(150, apply_and_close)
 
@@ -930,6 +1086,7 @@ class DateRangeField(ctk.CTkFrame):
         cal_right.bind("<<CalendarSelected>>", lambda e: on_day_selected(e, cal_right))
         refresh_titles()
         mark_range()
+        update_nav_enabled()
         _show_hidden_popup(popup_win, self, width=680, height=340, modal=False)
 
 
@@ -965,7 +1122,6 @@ class FreePeriodsEditor(ctk.CTkFrame):
 
         self.list_frame = _period_list_frame(self, grid_row=2)
         self.list_frame.grid_columnconfigure(1, weight=1)
-        self.list_frame.grid_columnconfigure(2, weight=1)
 
         if initial:
             for start, end, *_rest in initial:
@@ -982,7 +1138,7 @@ class FreePeriodsEditor(ctk.CTkFrame):
             self.list_frame,
             text="暂无免租期，可点击「添加时段」",
             text_color="#9ca3af",
-        ).grid(row=0, column=0, columnspan=4, sticky="w", pady=8)
+        ).grid(row=0, column=0, columnspan=3, sticky="w", pady=8)
 
     def add_row(self, start: str = "", end: str = "") -> None:
         self._rows.append(
@@ -1005,20 +1161,15 @@ class FreePeriodsEditor(ctk.CTkFrame):
             end_var = item["end_var"]
             assert isinstance(start_var, ctk.StringVar)
             assert isinstance(end_var, ctk.StringVar)
-            label = ctk.CTkLabel(self.list_frame, text=f"时段{idx + 1}", width=50)
-            start_picker = DatePickerField(
+            label = ctk.CTkLabel(self.list_frame, text=f"免租时段{idx + 1}", width=80)
+            range_picker = DateRangeField(
                 self.list_frame,
-                textvariable=start_var,
-                placeholder="开始",
-                max_date_getter=lambda v=end_var: DatePickerField._parse_optional(v.get()),
-            )
-            end_picker = DatePickerField(
-                self.list_frame,
-                textvariable=end_var,
-                placeholder="结束",
-                min_date_getter=lambda v=start_var: DatePickerField._parse_optional(
-                    v.get()
-                ),
+                startvariable=start_var,
+                endvariable=end_var,
+                start_placeholder="免租开始",
+                end_placeholder="免租截止",
+                entry_width=74,
+                allow_empty=True,
             )
 
             def make_remove(target_var: ctk.StringVar):
@@ -1038,9 +1189,8 @@ class FreePeriodsEditor(ctk.CTkFrame):
                 command=make_remove(start_var),
             )
             label.grid(row=idx, column=0, padx=(0, 6), pady=4, sticky="w")
-            start_picker.grid(row=idx, column=1, padx=4, pady=4, sticky="ew")
-            end_picker.grid(row=idx, column=2, padx=4, pady=4, sticky="ew")
-            remove_btn.grid(row=idx, column=3, padx=(6, 0), pady=4, sticky="e")
+            range_picker.grid(row=idx, column=1, padx=4, pady=4, sticky="w")
+            remove_btn.grid(row=idx, column=2, padx=(6, 0), pady=4, sticky="e")
             rebuilt.append(
                 {
                     "start_var": start_var,
@@ -1453,7 +1603,9 @@ class DiscountPeriodsEditor(ctk.CTkFrame):
                 period_text = f"{start_text}\u00a0~\u00a0{end_text}"
             else:
                 period_text = start_text[:7] if start_text else "—"
-            label = ctk.CTkLabel(self.list_frame, text=f"{idx + 1}", width=28)
+            label = ctk.CTkLabel(
+                self.list_frame, text=f"折/减时段{idx + 1}", width=80
+            )
             month_label = ctk.CTkLabel(
                 self.list_frame, text=period_text, width=168, anchor="w"
             )
