@@ -573,7 +573,7 @@ class PaymentsPage(ctk.CTkFrame):
             endvariable=self.paid_to_var,
             start_placeholder="实缴开始",
             end_placeholder="实缴截止",
-            entry_width=74,
+            entry_width=76,
             command=self.refresh,
         ).pack(side="left", padx=(8, 0))
 

@@ -275,7 +275,7 @@ class LeasesPage(ctk.CTkFrame):
             endvariable=self.term_to_var,
             start_placeholder="租期开始",
             end_placeholder="租期截止",
-            entry_width=74,
+            entry_width=76,
             command=self.refresh,
         ).pack(side="left", padx=(8, 0))
 

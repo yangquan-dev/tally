@@ -503,7 +503,7 @@ class DatePickerField(ctk.CTkFrame):
             except tk.TclError:
                 pass
 
-        # 与双月选择器一致：原生 Toplevel + tkcalendar.Calendar（非模态，支持点外部取消）
+        # 与日期范围选择器一致：原生 Toplevel + tkcalendar.Calendar（非模态，支持点外部取消）
         popup_win = _make_hidden_popup(self)
         popup = tk.Frame(popup_win, bg="#ffffff", highlightthickness=0)
         popup.pack(fill="both", expand=True)
@@ -583,7 +583,7 @@ class DatePickerField(ctk.CTkFrame):
 
 
 class DateRangeField(ctk.CTkFrame):
-    """类 Ant Design RangePicker：点击起/止回显框，双月面板点选范围。"""
+    """起止日期范围选择：点击起/止回显框，单月面板点选连续时段。"""
 
     def __init__(
         self,
@@ -593,7 +593,7 @@ class DateRangeField(ctk.CTkFrame):
         start_placeholder: str = "开始日期",
         end_placeholder: str = "结束日期",
         command: Optional[Callable[[], None]] = None,
-        entry_width: int = 74,
+        entry_width: int = 76,
         allow_empty: bool = True,
         **kwargs,
     ) -> None:
@@ -617,8 +617,8 @@ class DateRangeField(ctk.CTkFrame):
         self.end_label = self._make_fixed_date_label(
             inner, end_placeholder, entry_width
         )
-        self._bind_label_open(self.start_label, "start")
-        self._bind_label_open(self.end_label, "end")
+        self._bind_label_open(self.start_label)
+        self._bind_label_open(self.end_label)
         self._refresh_display()
         if allow_empty:
             ctk.CTkButton(
@@ -651,9 +651,9 @@ class DateRangeField(ctk.CTkFrame):
         label.pack(fill="both", expand=True)
         return label
 
-    def _bind_label_open(self, label: ctk.CTkLabel, side: str) -> None:
-        def open_picker(_event=None, which: str = side):
-            self.after_idle(lambda: self._open_range_picker(active=which))
+    def _bind_label_open(self, label: ctk.CTkLabel) -> None:
+        def open_picker(_event=None):
+            self.after_idle(self._open_range_picker)
             return "break"
 
         label.bind("<Button-1>", open_picker)
@@ -739,8 +739,7 @@ class DateRangeField(ctk.CTkFrame):
         )
         return _create_calendar(**cal_kwargs)
 
-    def _open_range_picker(self, active: str = "start") -> None:
-        del active  # 打开即清空重选，不再区分起/止入口
+    def _open_range_picker(self) -> None:
         if self._picker_open:
             return
         self._picker_open = True
@@ -755,8 +754,7 @@ class DateRangeField(ctk.CTkFrame):
         )
         self._set_readonly_values("", "")
         focus = start0 or end0 or date.today()
-        left_month = date(focus.year, focus.month, 1)
-        right_month = self._shift_month(left_month, 1)
+        current_month = date(focus.year, focus.month, 1)
 
         parent_top = self.winfo_toplevel()
         prev_grab = parent_top.grab_current()
@@ -792,147 +790,49 @@ class DateRangeField(ctk.CTkFrame):
 
         dismiss = _bind_popover_dismiss(popup_win, self, _destroy)
 
-        # 主体：双月（全部用原生 tk，避免 CTk 控件在 Toplevel 上画出主页面小方块）
-        body = tk.Frame(popup, bg="#ffffff")
-        body.pack(fill="both", expand=True, padx=10, pady=(10, 4))
-        body.grid_columnconfigure(0, weight=1)
-        body.grid_columnconfigure(2, weight=1)
-        body.grid_rowconfigure(0, weight=1)
-
-        left_card = tk.Frame(
-            body,
-            width=320,
-            height=300,
+        # 单月面板（原生 tk，避免 CTk 在 Toplevel 上闪主页面小方块）
+        card = tk.Frame(
+            popup,
             bg="#ffffff",
             highlightbackground="#e5e7eb",
             highlightthickness=1,
             bd=0,
         )
-        left_card.grid_propagate(False)
-        left_card.grid(row=0, column=0, sticky="nsew", padx=(4, 4), pady=4)
-        divider = tk.Frame(body, width=1, bg="#f0f0f0")
-        divider.grid(row=0, column=1, sticky="ns", pady=12)
-        right_card = tk.Frame(
-            body,
-            width=320,
-            height=300,
-            bg="#ffffff",
-            highlightbackground="#e5e7eb",
-            highlightthickness=1,
-            bd=0,
-        )
-        right_card.grid_propagate(False)
-        right_card.grid(row=0, column=2, sticky="nsew", padx=(4, 4), pady=4)
+        card.pack(fill="both", expand=True, padx=10, pady=10)
 
-        title_font = ("PingFang SC", 14, "bold")
-        left_title = tk.Label(
-            left_card,
-            text=f"{left_month.year}年{left_month.month}月",
+        title = tk.Label(
+            card,
+            text=f"{current_month.year}年{current_month.month}月",
             bg="#ffffff",
             fg="#111827",
-            font=title_font,
+            font=("PingFang SC", 14, "bold"),
         )
-        left_title.pack(pady=(10, 2))
-        right_title = tk.Label(
-            right_card,
-            text=f"{right_month.year}年{right_month.month}月",
-            bg="#ffffff",
-            fg="#111827",
-            font=title_font,
-        )
-        right_title.pack(pady=(10, 2))
+        title.pack(pady=(10, 2))
 
-        cal_left = self._make_calendar(left_card, left_month)
-        cal_right = self._make_calendar(right_card, right_month)
-        cal_left.pack(fill="both", expand=True, padx=8, pady=(0, 10))
-        cal_right.pack(fill="both", expand=True, padx=8, pady=(0, 10))
+        cal = self._make_calendar(card, current_month)
+        cal.pack(fill="both", expand=True, padx=8, pady=(0, 4))
+        cal.tag_config("range", background="#91caff", foreground="#003eb3")
+        cal.tag_config("range_edge", background="#1677ff", foreground="#ffffff")
+        try:
+            cal.selection_clear()
+        except Exception:
+            pass
 
-        for cal in (cal_left, cal_right):
-            cal.tag_config("range", background="#91caff", foreground="#003eb3")
-            cal.tag_config("range_edge", background="#1677ff", foreground="#ffffff")
-            try:
-                cal.selection_clear()
-            except Exception:
-                pass
+        month_state = {"current": current_month}
+        state: dict[str, object] = {"start": None, "end": None}
 
-        syncing = {"lock": False}
-        months = {"left": left_month, "right": right_month}
-        # 每次打开都从空开始重新选起止
-        state: dict[str, object] = {
-            "start": None,
-            "end": None,
-            "picking_start": True,
-            "anchor_side": None,
-        }
+        def refresh_title() -> None:
+            m, y = cal.get_displayed_month()
+            title.configure(text=f"{y}年{m}月")
+            month_state["current"] = date(y, m, 1)
 
-        def any_date_selected() -> bool:
-            return isinstance(state["start"], date) or isinstance(state["end"], date)
+        def show_month(month: date) -> None:
+            cal.see(month)
+            refresh_title()
+            mark_range()
 
-        def selected_month() -> date | None:
-            picked = state["start"] if isinstance(state["start"], date) else state["end"]
-            if not isinstance(picked, date):
-                return None
-            return date(picked.year, picked.month, 1)
-
-        def refresh_titles() -> None:
-            lm, ly = cal_left.get_displayed_month()
-            rm, ry = cal_right.get_displayed_month()
-            # get_displayed_month -> (month, year)
-            left_title.configure(text=f"{ly}年{lm}月")
-            right_title.configure(text=f"{ry}年{rm}月")
-            months["left"] = date(ly, lm, 1)
-            months["right"] = date(ry, rm, 1)
-
-        def update_nav_enabled() -> None:
-            sel_m = selected_month()
-            side = state["anchor_side"]
-            left_next_ok = True
-            right_prev_ok = True
-            if sel_m is not None and side == "left":
-                right_prev_ok = months["right"] > sel_m
-            elif sel_m is not None and side == "right":
-                left_next_ok = months["left"] < sel_m
-            left_next_btn.configure(state=("normal" if left_next_ok else "disabled"))
-            right_prev_btn.configure(state=("normal" if right_prev_ok else "disabled"))
-
-        def show_linked(left: date) -> None:
-            """未选日期时左右保持相邻月份并一起翻。"""
-            syncing["lock"] = True
-            try:
-                cal_left.see(left)
-                cal_right.see(self._shift_month(left, 1))
-                refresh_titles()
-                mark_range()
-                update_nav_enabled()
-            finally:
-                syncing["lock"] = False
-
-        def show_side(side: str, month: date) -> None:
-            """已有选中日期时只切换一侧。"""
-            sel_m = selected_month()
-            anchor = state["anchor_side"]
-            if sel_m is not None:
-                if side == "right" and anchor == "left" and month < sel_m:
-                    month = sel_m
-                if side == "left" and anchor == "right" and month > sel_m:
-                    month = sel_m
-            syncing["lock"] = True
-            try:
-                if side == "left":
-                    cal_left.see(month)
-                else:
-                    cal_right.see(month)
-                refresh_titles()
-                mark_range()
-                update_nav_enabled()
-            finally:
-                syncing["lock"] = False
-
-        def shift_side(side: str, delta: int) -> None:
-            if any_date_selected():
-                show_side(side, self._shift_month(months[side], delta))
-            else:
-                show_linked(self._shift_month(months["left"], delta))
+        def shift_month(delta: int) -> None:
+            show_month(self._shift_month(month_state["current"], delta))
 
         nav_kwargs = dict(
             relief="flat",
@@ -947,72 +847,21 @@ class DateRangeField(ctk.CTkFrame):
             padx=4,
             pady=0,
         )
-        left_prev_btn = tk.Button(
-            left_card, text="‹", command=lambda: shift_side("left", -1), **nav_kwargs
+        tk.Button(card, text="‹", command=lambda: shift_month(-1), **nav_kwargs).place(
+            relx=0.02, y=4, anchor="nw"
         )
-        left_prev_btn.place(relx=0.02, y=4, anchor="nw")
-        left_next_btn = tk.Button(
-            left_card, text="›", command=lambda: shift_side("left", 1), **nav_kwargs
+        tk.Button(card, text="›", command=lambda: shift_month(1), **nav_kwargs).place(
+            relx=0.98, y=4, anchor="ne"
         )
-        left_next_btn.place(relx=0.98, y=4, anchor="ne")
-        right_prev_btn = tk.Button(
-            right_card, text="‹", command=lambda: shift_side("right", -1), **nav_kwargs
-        )
-        right_prev_btn.place(relx=0.02, y=4, anchor="nw")
-        right_next_btn = tk.Button(
-            right_card, text="›", command=lambda: shift_side("right", 1), **nav_kwargs
-        )
-        right_next_btn.place(relx=0.98, y=4, anchor="ne")
 
-        def apply_date_bounds() -> None:
-            picked = state["start"] if isinstance(state["start"], date) else state["end"]
-            side = state["anchor_side"]
-            try:
-                if side == "left" and isinstance(picked, date):
-                    cal_right.configure(mindate=picked, maxdate=None)
-                    cal_left.configure(mindate=None, maxdate=None)
-                elif side == "right" and isinstance(picked, date):
-                    cal_left.configure(mindate=None, maxdate=picked)
-                    cal_right.configure(mindate=None, maxdate=None)
-                else:
-                    cal_left.configure(mindate=None, maxdate=None)
-                    cal_right.configure(mindate=None, maxdate=None)
-            except Exception:
-                pass
-
-        def on_month_changed(_event=None, source: str = "left") -> None:
-            if syncing["lock"]:
-                return
-            if any_date_selected():
-                refresh_titles()
-                sel_m = selected_month()
-                side = state["anchor_side"]
-                if sel_m is not None:
-                    if source == "right" and side == "left" and months["right"] < sel_m:
-                        show_side("right", sel_m)
-                        return
-                    if source == "left" and side == "right" and months["left"] > sel_m:
-                        show_side("left", sel_m)
-                        return
-                mark_range()
-                update_nav_enabled()
-                return
-            syncing["lock"] = True
-            try:
-                if source == "left":
-                    lm, ly = cal_left.get_displayed_month()
-                    cal_right.see(self._shift_month(date(ly, lm, 1), 1))
-                else:
-                    rm, ry = cal_right.get_displayed_month()
-                    cal_left.see(self._shift_month(date(ry, rm, 1), -1))
-                refresh_titles()
-                mark_range()
-                update_nav_enabled()
-            finally:
-                syncing["lock"] = False
-
-        cal_left.bind("<<CalendarMonthChanged>>", lambda e: on_month_changed(e, "left"))
-        cal_right.bind("<<CalendarMonthChanged>>", lambda e: on_month_changed(e, "right"))
+        tip = tk.Label(
+            card,
+            text="先选开始日期，再选结束日期",
+            bg="#ffffff",
+            fg="#9ca3af",
+            font=("PingFang SC", 11),
+        )
+        tip.pack(pady=(0, 8))
 
         def sync_external() -> None:
             start = state["start"]
@@ -1023,12 +872,11 @@ class DateRangeField(ctk.CTkFrame):
             )
 
         def clear_marks() -> None:
-            for cal in (cal_left, cal_right):
-                try:
-                    for eid in list(cal.get_calevents()):
-                        cal.calevent_remove(eid)
-                except Exception:
-                    pass
+            try:
+                for eid in list(cal.get_calevents()):
+                    cal.calevent_remove(eid)
+            except Exception:
+                pass
 
         def mark_range() -> None:
             clear_marks()
@@ -1038,14 +886,11 @@ class DateRangeField(ctk.CTkFrame):
             assert end is None or isinstance(end, date)
             sync_external()
             if start is None and end is None:
+                tip.configure(text="先选开始日期，再选结束日期")
                 return
-            if start is None and isinstance(end, date):
-                for cal in (cal_left, cal_right):
-                    cal.calevent_create(end, "end", "range_edge")
-                return
-            if end is None and isinstance(start, date):
-                for cal in (cal_left, cal_right):
-                    cal.calevent_create(start, "start", "range_edge")
+            if isinstance(start, date) and end is None:
+                cal.calevent_create(start, "start", "range_edge")
+                tip.configure(text=f"已选开始 {start.isoformat()}，再选结束日期")
                 return
             if start is None or end is None:
                 return
@@ -1056,17 +901,15 @@ class DateRangeField(ctk.CTkFrame):
             day = start
             while day <= end:
                 tag = "range_edge" if day in (start, end) else "range"
-                for cal in (cal_left, cal_right):
-                    cal.calevent_create(day, "range", tag)
+                cal.calevent_create(day, "range", tag)
                 day += timedelta(days=1)
+            tip.configure(text=f"{start.isoformat()} ~ {end.isoformat()}")
 
         def apply_and_close() -> None:
             start = state["start"]
             end = state["end"]
-            if not isinstance(start, date):
+            if not isinstance(start, date) or not isinstance(end, date):
                 return
-            if not isinstance(end, date):
-                end = start
             if start > end:
                 start, end = end, start
             committed["yes"] = True
@@ -1074,8 +917,7 @@ class DateRangeField(ctk.CTkFrame):
             dismiss()
             self._notify()
 
-        def on_day_selected(_event=None, source: Calendar | None = None) -> None:
-            cal = source or cal_left
+        def on_day_selected(_event=None) -> None:
             selected = cal.selection_get()
             if selected is None:
                 return
@@ -1085,43 +927,42 @@ class DateRangeField(ctk.CTkFrame):
                 cal.selection_clear()
             except Exception:
                 pass
-            clicked = "left" if source is cal_left else "right"
-            if state["picking_start"] or (
-                state["start"] is None and state["end"] is None
+            if state["start"] is None or (
+                isinstance(state["start"], date) and isinstance(state["end"], date)
             ):
-                state["anchor_side"] = clicked
-                if clicked == "left":
-                    state["start"] = selected
-                    state["end"] = None
-                else:
-                    state["start"] = None
-                    state["end"] = selected
-                state["picking_start"] = False
-                apply_date_bounds()
-                mark_range()
-                update_nav_enabled()
-                return
-            if state["anchor_side"] == "left":
-                start = state["start"]
-                assert isinstance(start, date)
-                if selected < start:
-                    return
-                state["end"] = selected
-            else:
-                end = state["end"]
-                assert isinstance(end, date)
-                if selected > end:
-                    return
                 state["start"] = selected
+                state["end"] = None
+                try:
+                    cal.configure(mindate=selected, maxdate=None)
+                except Exception:
+                    pass
+                mark_range()
+                return
+            start = state["start"]
+            assert isinstance(start, date)
+            if selected < start:
+                # 点到更早日期：改以该日为新起点
+                state["start"] = selected
+                state["end"] = None
+                try:
+                    cal.configure(mindate=selected, maxdate=None)
+                except Exception:
+                    pass
+                mark_range()
+                return
+            state["end"] = selected
+            try:
+                cal.configure(mindate=None, maxdate=None)
+            except Exception:
+                pass
             mark_range()
-            popup.after(150, apply_and_close)
+            popup.after(120, apply_and_close)
 
-        cal_left.bind("<<CalendarSelected>>", lambda e: on_day_selected(e, cal_left))
-        cal_right.bind("<<CalendarSelected>>", lambda e: on_day_selected(e, cal_right))
-        refresh_titles()
+        cal.bind("<<CalendarSelected>>", on_day_selected)
+        cal.bind("<<CalendarMonthChanged>>", lambda _e: (refresh_title(), mark_range()))
+        refresh_title()
         mark_range()
-        update_nav_enabled()
-        _show_hidden_popup(popup_win, self, width=680, height=340, modal=False)
+        _show_hidden_popup(popup_win, self, width=340, height=340, modal=False)
 
 
 class FreePeriodsEditor(ctk.CTkFrame):
@@ -1209,7 +1050,7 @@ class FreePeriodsEditor(ctk.CTkFrame):
                 endvariable=end_var,
                 start_placeholder="免租开始",
                 end_placeholder="免租截止",
-                entry_width=74,
+                entry_width=76,
                 allow_empty=True,
             )
 
